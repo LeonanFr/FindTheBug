@@ -1,0 +1,29 @@
+# Visual Studio
+.vs/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# Build folders
+out/
+build/
+Debug/
+Release/
+
+# CMake files
+CMakeCache.txt
+CMakeFiles/
+CMakeScripts/
+cmake_install.cmake
+*.cmake
+*.ninja
+*.obj
+*.pdb
+*.lib
+*.dll
+*.exe
+
+# Other
+*.log
+*.db
