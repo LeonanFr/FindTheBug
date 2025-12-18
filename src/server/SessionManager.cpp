@@ -8,14 +8,14 @@ using namespace FindTheBug;
 static std::mutex global_send_mutex;
 static std::mutex global_log_mutex;
 
-void SessionManager::registerConnection(const std::string& sessionId, crow::websocket::connection* conn) {
+void SessionManager::registerConnection(const std::string& sessionId, crow::websocket::connection* conn, const std::string& playerName) {
     if (!conn) return;
 
     std::lock_guard<std::mutex> lock(mutex_);
 
     sessionConnections_[sessionId].insert(conn);
-
     connectionToSession_[conn] = sessionId;
+    connectionToPlayer_[conn] = playerName;
 
     log("[SessionManager] Conexao registrada na sessao: " + sessionId);
 }
@@ -33,9 +33,24 @@ void SessionManager::unregisterConnection(crow::websocket::connection* conn) {
         }
 
         connectionToSession_.erase(conn);
+        connectionToPlayer_.erase(conn);
 
         log("[SessionManager] Conexao removida da sessao: " + sessionId);
     }
+}
+
+bool SessionManager::isPlayerOnline(const std::string& sessionId, const std::string& playerName) {
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    if (!sessionConnections_.contains(sessionId)) return false;
+
+    for (auto* conn : sessionConnections_[sessionId]) {
+        if (connectionToPlayer_.contains(conn) && connectionToPlayer_[conn] == playerName) {
+            return true;
+        }
+    }
+
+    return false;
 }
 
 void FindTheBug::SessionManager::closeSession(const std::string& sessionId)

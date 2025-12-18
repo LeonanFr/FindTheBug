@@ -11,13 +11,26 @@
 
 using namespace FindTheBug;
 
-static std::string escapeJSON(const std::string& s) {
+std::string escapeJSON(const std::string& s) {
     std::ostringstream o;
     for (auto c : s) {
-        if (c == '"') o << "\\\"";
-        else if (c == '\\') o << "\\\\";
-        else if ((unsigned char)c < 0x20) o << "\\u" << std::hex << std::setw(4) << std::setfill('0') << (int)c;
-        else o << c;
+        switch (c) {
+        case '"': o << "\\\""; break;
+        case '\\': o << "\\\\"; break;
+        case '\b': o << "\\b"; break;
+        case '\f': o << "\\f"; break;
+        case '\n': o << "\\n"; break;
+        case '\r': o << "\\r"; break;
+        case '\t': o << "\\t"; break;
+        default:
+            if ('\x00' <= c && c <= '\x1f') {
+                o << "\\u"
+                    << std::hex << std::setw(4) << std::setfill('0') << (int)c;
+            }
+            else {
+                o << c;
+            }
+        }
     }
     return o.str();
 }
@@ -35,20 +48,73 @@ taskQueue(std::move(taskQueue))
     SessionManager::log("[INIT] HttpServer inicializado com fila de tarefas.");
 }
 
+void HttpServer::runReaper() {
+    std::thread([this]() {
+        while (true) {
+            std::this_thread::sleep_for(std::chrono::seconds(5));
+
+            storage->removeStaleSessions(5);
+
+            auto activeSessions = storage->getFrozenSessions(0);
+
+            for (const auto& sid : activeSessions) {
+                auto stateOpt = storage->getGameState(sid);
+                if (!stateOpt) continue;
+                auto state = *stateOpt;
+
+                auto now = std::chrono::system_clock::now();
+
+                if (state.isCompleted) {
+                    auto endedAgo = std::chrono::duration_cast<std::chrono::seconds>(now - state.lastActivity).count();
+
+                    if (endedAgo > 60) {
+                        SessionManager::log("[REAPER] Jogo finalizado ha >60s na sessao " + sid + ". Deletando.");
+                        storage->deleteSession(sid);
+                        sessionManager->closeSession(sid);
+                    }
+                    continue;
+                }
+
+                if (state.turnOrder.empty()) {
+                    storage->deleteSession(sid);
+                    sessionManager->closeSession(sid);
+                    continue;
+                }
+                auto duration = std::chrono::duration_cast<std::chrono::seconds>(now - state.turnStartTime).count();
+                std::string currentPlayer = state.turnOrder[state.currentTurnIndex];
+
+                bool isOnline = sessionManager->isPlayerOnline(sid, currentPlayer);
+                long timeLimit = isOnline ? 120 : 15;
+
+                if (duration > timeLimit) {
+
+                    state.currentTurnIndex = (state.currentTurnIndex + 1) % state.turnOrder.size();
+
+                    state.turnStartTime = std::chrono::system_clock::now();
+
+                    if (storage->saveGameState(state)) {
+                        broadcastGameState(sid);
+
+                        std::string reason = isOnline ? "TIMEOUT" : "OFFLINE_SKIP";
+                        std::string msg = std::format(
+                            "{{\"type\":\"TURN_SKIPPED\",\"previousPlayer\":\"{}\",\"reason\":\"{}\"}}",
+                            currentPlayer, reason
+                        );
+                        sessionManager->broadcastToSession(sid, msg);
+                    }
+                }
+            }
+        }
+        }).detach();
+}
+
 void HttpServer::run(uint16_t port) {
 
     SessionManager::log("[DEBUG] HttpServer::run iniciando na porta " + std::to_string(port));
 
+    this->runReaper();
+
     crow::SimpleApp app;
-
-    CROW_ROUTE(app, "/action").methods(crow::HTTPMethod::POST)
-        ([this](const crow::request& req) {
-
-        SessionManager::log("[HTTP] /action recebido");
-
-        return this->handleAction(req);
-
-            });
 
     CROW_ROUTE(app, "/cases").methods(crow::HTTPMethod::GET)
         ([this]() {
@@ -217,7 +283,7 @@ void HttpServer::processCreateLobby(crow::websocket::connection* conn, const std
         host.joinedAt = std::chrono::system_clock::now();
 
         if (storage->createLobby(sessionId, host)) {
-            sessionManager->registerConnection(sessionId, conn);
+            sessionManager->registerConnection(sessionId, conn, playerName);
 
             std::string resp = std::format(
                 "{{\"type\":\"LOBBY_CREATED\",\"sessionId\":\"{}\",\"playerName\":\"{}\",\"role\":{}}}",
@@ -235,58 +301,129 @@ void HttpServer::processCreateLobby(crow::websocket::connection* conn, const std
 
 void HttpServer::processJoinAsPlayer(crow::websocket::connection* conn, const std::string& sessionId, const std::string& playerName) {
     taskQueue->enqueue([this, conn, sessionId, playerName]() {
-        if (!storage->sessionExists(sessionId)) {
+
+        auto lobbyOpt = storage->getLobby(sessionId);
+        if (!lobbyOpt) {
             SessionManager::sendTo(conn, "{\"type\":\"ERROR\",\"message\":\"Lobby nao encontrado\"}");
             return;
         }
+        const auto& lobby = *lobbyOpt;
 
-        PlayerInfo p;
-        p.name = playerName;
-        p.role = PlayerRole::Player;
-        p.joinedAt = std::chrono::system_clock::now();
+        bool isRejoining = false;
 
-        if (storage->addPlayerToLobby(sessionId, p)) {
-            sessionManager->registerConnection(sessionId, conn);
+        for (const auto& p : lobby.players) {
+            if (p.name == playerName) {
+                isRejoining = true;
+                break;
+            }
+        }
+
+        if (isRejoining) {
+            sessionManager->registerConnection(sessionId, conn, playerName);
 
             std::string resp = std::format(
-                "{{\"type\":\"JOINED_LOBBY\",\"sessionId\":\"{}\",\"playerName\":\"{}\",\"role\":{}}}",
-                sessionId, escapeJSON(playerName), (int)PlayerRole::Player
+                "{{\"type\":\"JOINED_LOBBY\",\"sessionId\":\"{}\",\"playerName\":\"{}\",\"isRejoin\":true}}",
+                sessionId, escapeJSON(playerName)
             );
             SessionManager::sendTo(conn, resp);
 
-            broadcastLobbyState(sessionId);
+            if (lobby.phase == GamePhase::Investigation) {
+                broadcastGameState(sessionId);
+            }
+
+            SessionManager::log("[RECONNECT] Jogador " + playerName + " voltou para sessao " + sessionId);
         }
         else {
-            SessionManager::sendTo(conn, "{\"type\":\"ERROR\",\"message\":\"Nao foi possivel entrar (Nome em uso ou erro DB)\"}");
+            PlayerInfo p;
+            p.name = playerName;
+            p.role = PlayerRole::Player;
+            p.joinedAt = std::chrono::system_clock::now();
+
+            if (storage->addPlayerToLobby(sessionId, p)) {
+                sessionManager->registerConnection(sessionId, conn, playerName);
+
+                std::string resp = std::format(
+                    "{{\"type\":\"JOINED_LOBBY\",\"sessionId\":\"{}\",\"playerName\":\"{}\",\"role\":{}}}",
+                    sessionId, escapeJSON(playerName), (int)PlayerRole::Player
+                );
+                SessionManager::sendTo(conn, resp);
+                broadcastLobbyState(sessionId);
+            }
+            else {
+                SessionManager::sendTo(conn, "{\"type\":\"ERROR\",\"message\":\"Erro ao salvar jogador (Nome em uso?)\"}");
+            }
         }
         });
 }
 
 void HttpServer::processJoinAsMaster(crow::websocket::connection* conn, const std::string& sessionId, const std::string& masterName) {
     taskQueue->enqueue([this, conn, sessionId, masterName]() {
-        if (!storage->sessionExists(sessionId)) {
+
+        auto lobbyOpt = storage->getLobby(sessionId);
+        if (!lobbyOpt) {
             SessionManager::sendTo(conn, "{\"type\":\"ERROR\",\"message\":\"Lobby nao encontrado\"}");
             return;
         }
 
-        PlayerInfo m;
-        m.name = masterName;
-        m.role = PlayerRole::Master;
-        m.joinedAt = std::chrono::system_clock::now();
+        const auto& lobby = *lobbyOpt;
 
-        if (storage->addPlayerToLobby(sessionId, m)) {
-            sessionManager->registerConnection(sessionId, conn);
+        bool isRejoin = false;
+        bool masterExists = false;
+
+        for (const auto& p : lobby.players) {
+            if (p.role == PlayerRole::Master) {
+                masterExists = true;
+                if (p.name == masterName) {
+                    isRejoin = true;
+                }
+                break;
+            }
+        }
+
+        if (masterExists && !isRejoin) {
+            SessionManager::sendTo(conn, "{\"type\":\"ERROR\",\"message\":\"Ja existe um Mestre nesta sessao.\"}");
+            return;
+        }
+
+        if (isRejoin) {
+            sessionManager->registerConnection(sessionId, conn, masterName);
 
             std::string resp = std::format(
-                "{{\"type\":\"JOINED_LOBBY\",\"sessionId\":\"{}\",\"playerName\":\"{}\",\"role\":{}}}",
+                "{{\"type\":\"JOINED_LOBBY\",\"sessionId\":\"{}\",\"playerName\":\"{}\",\"role\":{},\"isRejoin\":true}}",
                 sessionId, escapeJSON(masterName), (int)PlayerRole::Master
             );
             SessionManager::sendTo(conn, resp);
 
-            broadcastLobbyState(sessionId);
+            if (lobby.phase != GamePhase::Lobby) {
+                broadcastGameState(sessionId);
+            }
+            SessionManager::log("[RECONNECT] Mestre " + masterName + " voltou para sessao " + sessionId);
         }
         else {
-            SessionManager::sendTo(conn, "{\"type\":\"ERROR\",\"message\":\"Mestre ja existe ou erro\"}");
+            PlayerInfo m;
+            m.name = masterName;
+            m.role = PlayerRole::Master;
+            m.joinedAt = std::chrono::system_clock::now();
+
+            if (storage->addPlayerToLobby(sessionId, m)) {
+                sessionManager->registerConnection(sessionId, conn, masterName);
+
+                std::string resp = std::format(
+                    "{{\"type\":\"JOINED_LOBBY\",\"sessionId\":\"{}\",\"playerName\":\"{}\",\"role\":{}}}",
+                    sessionId, escapeJSON(masterName), (int)PlayerRole::Master
+                );
+                SessionManager::sendTo(conn, resp);
+
+                if (lobby.phase != GamePhase::Lobby) {
+                    broadcastGameState(sessionId);
+                }
+                else {
+                    broadcastLobbyState(sessionId);
+                }
+            }
+            else {
+                SessionManager::sendTo(conn, "{\"type\":\"ERROR\",\"message\":\"Erro ao salvar Mestre.\"}");
+            }
         }
         });
 }
@@ -483,7 +620,7 @@ void HttpServer::processSaveNote(crow::websocket::connection* conn, const std::s
         bool success = engine->savePlayerNote(sessionId, playerId, clueId, content);
 
         if (success) {
-            // Sucesso: Atualiza o estado para todos (a nota aparece no "caderno")
+
             broadcastGameState(sessionId);
         }
         else {
@@ -561,8 +698,4 @@ std::string HttpServer::generateSessionId() {
     std::string s;
     for (int i = 0; i < 6; ++i) s += alphanum[dis(gen)];
     return s;
-}
-
-crow::response HttpServer::handleAction(const crow::request& req) {
-    return crow::response(200, "OK");
 }

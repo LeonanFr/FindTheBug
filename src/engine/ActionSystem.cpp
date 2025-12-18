@@ -29,6 +29,7 @@ int ActionSystem::calculateCost(
         return 2;
 
     case ActionType::SubmitSolution:
+    case ActionType::SkipTurn:
         return 0;
 
     default:
@@ -69,6 +70,13 @@ ActionResult ActionSystem::execute(
         result.success = true;
         result.pointsSpent = 0;
         result.message = "Solucao enviada para analise.";
+        return result;
+    }
+    
+    if (actionType == ActionType::SubmitSolution) {
+        result.success = true;
+        result.pointsSpent = 0;
+        result.message = "O jogador decidiu passar a vez.";
         return result;
     }
 

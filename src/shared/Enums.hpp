@@ -11,7 +11,8 @@ namespace FindTheBug {
 		SetBreakpoint,
 		RunUnitTests,
 		RunIntegrationTests,
-		SubmitSolution
+		SubmitSolution,
+		SkipTurn
 	};
 
 	enum class ClueType {

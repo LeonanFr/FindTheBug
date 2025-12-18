@@ -35,6 +35,7 @@ namespace FindTheBug {
         );
 
         GameResult finalizeSession(const std::string& sessionId, bool approvedByMaster);
+        GameResult removePlayer(const std::string& sessionId, const std::string& playerId);
 
         bool savePlayerNote(
             const std::string& sessionId,

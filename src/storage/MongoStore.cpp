@@ -41,6 +41,7 @@ MongoStore::MongoStore(const std::string& connectionUri, const std::string& dbNa
 
 MongoStore::~MongoStore() = default;
 
+
 // Operações de Lobby
 
 bool MongoStore::createLobby(const std::string& sessionId, const PlayerInfo& host) {
@@ -313,6 +314,20 @@ std::optional<GameState> MongoStore::getGameState(const std::string& sessionId) 
 
         if (view["currentTurnIndex"]) gs.currentTurnIndex = view["currentTurnIndex"].get_int32().value;
 
+        if (view["turnStartTime"]) {
+            gs.turnStartTime = view["turnStartTime"].get_date();
+        }
+        else {
+            gs.turnStartTime = std::chrono::system_clock::now();
+        }
+
+        if (view["lastActivity"]) {
+            gs.lastActivity = view["lastActivity"].get_date();
+        }
+        else {
+            gs.lastActivity = std::chrono::system_clock::now();
+        }
+
         if (view["turnOrder"] && view["turnOrder"].type() == bsoncxx::type::k_array) {
             for (const auto& elem : view["turnOrder"].get_array().value) {
                 gs.turnOrder.push_back(std::string(elem.get_string().value));
@@ -339,7 +354,7 @@ std::optional<GameState> MongoStore::getGameState(const std::string& sessionId) 
 
         if (view["discoveredClues"] && view["discoveredClues"].type() == bsoncxx::type::k_array) {
             for (const auto& elem : view["discoveredClues"].get_array().value) {
-                DiscoveredClue c; // Note: Usando DiscoveredClue, não Clue
+                DiscoveredClue c;
                 auto doc = elem.get_document().view();
 
                 if (doc["id"]) c.id = std::string(doc["id"].get_string().value);
@@ -347,6 +362,7 @@ std::optional<GameState> MongoStore::getGameState(const std::string& sessionId) 
                 if (doc["targetType"]) c.targetType = static_cast<TargetType>(doc["targetType"].get_int32().value);
                 if (doc["type"]) c.type = static_cast<ClueType>(doc["type"].get_int32().value);
                 if (doc["content"]) c.content = std::string(doc["content"].get_string().value);
+                if (doc["discoveredBy"]) c.discoveredBy = std::string(doc["discoveredBy"].get_string().value);
 
                 if (doc["playerNotes"] && doc["playerNotes"].type() == bsoncxx::type::k_document) {
                     auto notesView = doc["playerNotes"].get_document().view();
@@ -439,6 +455,7 @@ bool MongoStore::saveGameState(const GameState& state) {
                 << "targetType" << static_cast<int>(clue.targetType)
                 << "type" << static_cast<int>(clue.type)
                 << "content" << clue.content
+                << "discoveredBy" << clue.discoveredBy
                 << "playerNotes" << notes_doc
                 << bsoncxx::builder::stream::close_document;
         }
@@ -453,11 +470,11 @@ bool MongoStore::saveGameState(const GameState& state) {
             << "hostPlayerId" << state.hostPlayerId
             << "currentTurnIndex" << state.currentTurnIndex
             << "turnOrder" << turn_order_array
-
+            << "turnStartTime" << bsoncxx::types::b_date(state.turnStartTime)
             << "discoveredClues" << clues_array
             << "investigatedTargets" << inv_array
             << "breakpointedTargets" << bp_array
-            << "lastActivity" << bsoncxx::types::b_date(std::chrono::system_clock::now())
+            << "lastActivity" << bsoncxx::types::b_date(state.lastActivity)
             << close_document << finalize;
 
         auto result = collection.update_one(
@@ -510,4 +527,45 @@ bool MongoStore::deleteSession(const std::string& sessionId) {
         std::print("[MONGO CRITICO] Erro desconhecido ao deletar sessao.\n");
         return false;
     }
+}
+
+long MongoStore::removeStaleSessions(int minutes) {
+    try {
+        auto conn = pImpl->acquire();
+        auto db = (*conn)[pImpl->dbName];
+        auto collection = db["sessions"];
+
+        auto cutoff = std::chrono::system_clock::now() - std::chrono::minutes(minutes);
+
+        auto result = collection.delete_many(
+            document{} << "lastActivity" << open_document
+            << "$lt" << bsoncxx::types::b_date(cutoff)
+            << close_document << finalize
+        );
+
+        if (result) return result->deleted_count();
+        return 0;
+    }
+    catch (...) { return 0; }
+}
+
+std::vector<std::string> MongoStore::getFrozenSessions(int maxTurnSeconds) {
+    std::vector<std::string> activeSessions;
+    try {
+        auto conn = pImpl->acquire();
+        auto db = (*conn)[pImpl->dbName];
+        auto collection = db["sessions"];
+
+        auto cursor = collection.find(
+            document{} << "phase" << 1 << finalize
+        );
+
+        for (auto&& doc : cursor) {
+            if (doc["sessionId"]) {
+                activeSessions.push_back(std::string(doc["sessionId"].get_string().value));
+            }
+        }
+    }
+    catch (...) {}
+    return activeSessions;
 }

@@ -24,6 +24,8 @@ namespace FindTheBug {
 
 		bool saveGameState(const GameState& state);
 		bool deleteSession(const std::string& sessionId);
+		long removeStaleSessions(int minutes);
+		std::vector<std::string> getFrozenSessions(int maxTurnSeconds);
 
 	private:
 		class Impl;

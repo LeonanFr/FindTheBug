@@ -23,6 +23,7 @@ namespace FindTheBug {
 		ClueType type;
 		TargetType targetType;
 		std::string content;
+		std::string discoveredBy;
 		std::map<std::string, std::string> playerNotes;
 	};
 
@@ -84,6 +85,7 @@ namespace FindTheBug {
 	struct GameState {
 		std::string sessionId;
 		std::string currentCaseId;
+		std::chrono::system_clock::time_point lastActivity;
 		int currentDay{ 1 };
 		int remainingPoints{ 12 };
 		bool isCompleted{ false };

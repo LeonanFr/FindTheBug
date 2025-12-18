@@ -56,6 +56,7 @@ namespace FindTheBug {
         }
         initialState.currentTurnIndex = 0;
         initialState.turnStartTime = std::chrono::system_clock::now();
+        initialState.lastActivity = std::chrono::system_clock::now();
         initialState.sessionId = sessionId;
         initialState.currentCaseId = caseId;
         initialState.currentDay = 1;
@@ -105,7 +106,6 @@ namespace FindTheBug {
             if (!state.turnOrder.empty()) {
                 std::string currentPlayer = state.turnOrder[state.currentTurnIndex];
                 if (playerId != currentPlayer) {
-                    // AQUI ESTAVA O ERRO: "Não" -> "Nao"
                     return { .success = false, .newState = state, .message = "Nao e seu turno. Vez de: " + currentPlayer };
                 }
             }
@@ -140,6 +140,7 @@ namespace FindTheBug {
                 dc.type = actionResult.unlockedClue->type;
                 dc.targetType = actionResult.unlockedClue->targetType;
                 dc.content = actionResult.unlockedClue->content;
+                dc.discoveredBy = playerId;
                 state.discoveredClues.push_back(dc);
             }
         }
@@ -151,6 +152,8 @@ namespace FindTheBug {
             state.breakpointedTargets.insert(targetId);
         }
 
+        state.lastActivity = std::chrono::system_clock::now();
+
         state.actionHistory.push_back({
             .playerId = playerId,
             .actionType = actionType,
@@ -161,6 +164,10 @@ namespace FindTheBug {
         if (actionResult.pointsSpent > 0 && !state.turnOrder.empty()) {
             state.currentTurnIndex = (state.currentTurnIndex + 1) % state.turnOrder.size();
             state.turnStartTime = std::chrono::system_clock::now();
+
+            if (actionResult.unlockedClue) {
+                state.turnStartTime += std::chrono::seconds(30);
+            }
         }
 
         if (state.remainingPoints <= 0) {
@@ -200,13 +207,25 @@ namespace FindTheBug {
         bool found = false;
         for (auto& dc : state.discoveredClues) {
             if (dc.id == clueId) {
-                dc.playerNotes[playerId] = content;
+                if (content.empty()) {
+                    if (dc.discoveredBy == playerId) {
+                        return false;
+                    }
+                    else {
+                        dc.playerNotes.erase(playerId);
+                    }
+                }
+                else {
+                    dc.playerNotes[playerId] = content;
+                }
                 found = true;
                 break;
             }
         }
 
         if (!found) return false;
+
+        state.lastActivity = std::chrono::system_clock::now();
 
         return pImpl->storage->saveGameState(state);
     }
@@ -217,6 +236,9 @@ namespace FindTheBug {
 
         auto stateOpt = pImpl->storage->getGameState(sessionId);
         if (!stateOpt) return { .isCorrect = false, .score = 0, .generalMessage = "Sessão inválida" };
+
+        stateOpt->lastActivity = std::chrono::system_clock::now();
+        pImpl->storage->saveGameState(*stateOpt);
 
         auto bugCaseOpt = pImpl->storage->getCase(stateOpt->currentCaseId);
         if (!bugCaseOpt) return { .isCorrect = false, .score = 0, .generalMessage = "Caso inválido" };
@@ -252,6 +274,43 @@ namespace FindTheBug {
         }
 
         state.remainingPoints = 12;
+
+        pImpl->storage->saveGameState(state);
+        return GameResult::Running;
+    }
+
+
+    GameResult GameEngine::removePlayer(const std::string& sessionId, const std::string& playerId) {
+        auto stateOpt = pImpl->storage->getGameState(sessionId);
+        if (!stateOpt) return GameResult::Running;
+        auto state = *stateOpt;
+
+        auto it = std::remove(state.playerIds.begin(), state.playerIds.end(), playerId);
+        state.playerIds.erase(it, state.playerIds.end());
+
+        auto itTurn = std::find(state.turnOrder.begin(), state.turnOrder.end(), playerId);
+        if (itTurn != state.turnOrder.end()) {
+            int indexRemoved = std::distance(state.turnOrder.begin(), itTurn);
+            state.turnOrder.erase(itTurn);
+
+            if (state.currentTurnIndex >= state.turnOrder.size()) {
+                state.currentTurnIndex = 0;
+            }
+            else if (indexRemoved < state.currentTurnIndex) {
+                state.currentTurnIndex--;
+            }
+
+            if (indexRemoved == state.currentTurnIndex) {
+                state.turnStartTime = std::chrono::system_clock::now();
+            }
+        }
+
+    
+        if (state.turnOrder.size() < 2) {
+            state.isCompleted = true;
+            pImpl->storage->saveGameState(state);
+            return GameResult::Defeat;
+        }
 
         pImpl->storage->saveGameState(state);
         return GameResult::Running;
