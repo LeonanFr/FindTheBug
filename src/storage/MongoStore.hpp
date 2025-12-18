@@ -20,6 +20,8 @@ namespace FindTheBug {
 
 		std::optional<BugCase> getCase(const std::string& caseId) const;
 		std::optional<GameState> getGameState(const std::string& sessionId) const;
+		std::vector<CaseSummary> listAvailableCases() const;
+
 		bool saveGameState(const GameState& state);
 		bool deleteSession(const std::string& sessionId);
 

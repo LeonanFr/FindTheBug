@@ -5,6 +5,7 @@
 #include <iostream>
 #include <print>
 #include <random>
+#include <format>
 #include <sstream>
 #include <iomanip>
 
@@ -49,6 +50,61 @@ void HttpServer::run(uint16_t port) {
 
             });
 
+    CROW_ROUTE(app, "/cases").methods(crow::HTTPMethod::GET)
+        ([this]() {
+        auto cases = storage->listAvailableCases();
+     
+        std::vector<crow::json::wvalue> casesJson;
+        for (const auto& c : cases) {
+            crow::json::wvalue cv;
+            cv["id"] = c.id;
+            cv["title"] = c.title;
+            cv["shortDescription"] = c.shortDescription;
+            casesJson.push_back(cv);
+        }
+
+        crow::json::wvalue finalJson;
+        finalJson["cases"] = std::move(casesJson);
+        return finalJson;
+
+            });
+
+    CROW_ROUTE(app, "/cases/<string>").methods(crow::HTTPMethod::GET)
+        ([this](std::string caseId) {
+        auto caseOpt = storage->getCase(caseId);
+        if (!caseOpt) return crow::response(404, "Caso nao encontrado");
+
+        const auto& c = *caseOpt;
+        crow::json::wvalue j;
+        j["id"] = c.id;
+        j["title"] = c.title;
+        j["description"] = c.description;
+
+        crow::json::wvalue topo;
+
+        std::vector<crow::json::wvalue> mods;
+        for (const auto& m : c.systemTopology.modules) {
+            crow::json::wvalue mv; mv["name"] = m.name; mods.push_back(mv);
+        }
+        topo["modules"] = std::move(mods);
+
+        std::vector<crow::json::wvalue> funcs;
+        for (const auto& f : c.systemTopology.functions) {
+            crow::json::wvalue fv; fv["name"] = f.name; fv["parentId"] = f.parentId; funcs.push_back(fv);
+        }
+        topo["functions"] = std::move(funcs);
+
+        std::vector<crow::json::wvalue> conns;
+        for (const auto& cn : c.systemTopology.connections) {
+            crow::json::wvalue cv; cv["id"] = cn.id; cv["from"] = cn.from; cv["to"] = cn.to; conns.push_back(cv);
+        }
+        topo["connections"] = std::move(conns);
+
+        j["systemTopology"] = std::move(topo);
+
+
+        return crow::response(j);
+            });
 
     auto wsOpenHandler = std::bind(&HttpServer::handleWebSocketOpen, this, std::placeholders::_1);
     auto wsCloseHandler = std::bind(&HttpServer::handleWebSocketClose, this,
@@ -127,6 +183,17 @@ void HttpServer::handleWebSocketMessage(crow::websocket::connection& conn, const
         else if (type == "VALIDATE_SOLUTION") {
             if (msg.has("sessionId") && msg.has("approved")) {
                 processValidateSolution(&conn, msg["sessionId"].s(), msg["approved"].b());
+            }
+        }
+        else if (type == "GAME_ACTION") {
+            if (msg.has("sessionId") && msg.has("playerId") && msg.has("actionType") && msg.has("targetId")) {
+                ActionType aType = static_cast<ActionType>(msg["actionType"].i());
+                processGameAction(&conn, msg["sessionId"].s(), msg["playerId"].s(), aType, msg["targetId"].s());
+            }
+        }
+        else if (type == "SAVE_NOTE") {
+            if (msg.has("sessionId") && msg.has("playerId") && msg.has("clueId") && msg.has("content")) {
+                processSaveNote(&conn, msg["sessionId"].s(), msg["playerId"].s(), msg["clueId"].s(), msg["content"].s());
             }
         }
         else if (type == "LEAVE_LOBBY") {
@@ -385,7 +452,84 @@ void FindTheBug::HttpServer::processValidateSolution(crow::websocket::connection
         });
 }
 
+void HttpServer::processGameAction(crow::websocket::connection* conn, const std::string& sessionId, const std::string& playerId, ActionType actionType, const std::string& targetId) {
+    taskQueue->enqueue([this, conn, sessionId, playerId, actionType, targetId]() {
+
+        auto result = engine->processAction(playerId, actionType, targetId, sessionId);
+
+        if (!result.success) {
+            std::string err = std::format("{{\"type\":\"ERROR\",\"message\":\"{}\"}}", escapeJSON(result.message));
+            SessionManager::sendTo(conn, err);
+            return;
+        }
+
+        broadcastGameState(sessionId);
+
+        if (result.revealedClue) {
+            std::string revealMsg = std::format(
+                "{{\"type\":\"CLUE_REVEALED\",\"clueId\":\"{}\",\"content\":\"{}\",\"duration\":30,\"investigator\":\"{}\"}}",
+                result.revealedClue->id,
+                escapeJSON(result.revealedClue->content),
+                playerId
+            );
+            sessionManager->broadcastToSession(sessionId, revealMsg);
+        }
+        });
+}
+
+void HttpServer::processSaveNote(crow::websocket::connection* conn, const std::string& sessionId, const std::string& playerId, const std::string& clueId, const std::string& content) {
+    taskQueue->enqueue([this, conn, sessionId, playerId, clueId, content]() {
+
+        bool success = engine->savePlayerNote(sessionId, playerId, clueId, content);
+
+        if (success) {
+            // Sucesso: Atualiza o estado para todos (a nota aparece no "caderno")
+            broadcastGameState(sessionId);
+        }
+        else {
+            SessionManager::sendTo(conn, "{\"type\":\"ERROR\",\"message\":\"Falha ao salvar nota (Pista nao encontrada?)\"}");
+        }
+        });
+}
+
 // Helpers
+
+void HttpServer::broadcastGameState(const std::string& sessionId) {
+    auto stateOpt = storage->getGameState(sessionId);
+    if (!stateOpt) return;
+    auto& state = *stateOpt;
+
+    crow::json::wvalue json;
+    json["type"] = "GAME_STATE_UPDATE";
+    json["sessionId"] = state.sessionId;
+    json["currentDay"] = state.currentDay;
+    json["remainingPoints"] = state.remainingPoints;
+
+    json["currentTurnIndex"] = state.currentTurnIndex;
+    if (!state.turnOrder.empty()) {
+        json["currentTurnPlayer"] = state.turnOrder[state.currentTurnIndex];
+    }
+
+    std::vector<crow::json::wvalue> cluesJson;
+    for (const auto& c : state.discoveredClues) {
+        crow::json::wvalue cj;
+        cj["id"] = c.id;
+        cj["targetId"] = c.targetId;
+        cj["type"] = static_cast<int>(c.type);
+        cj["content"] = c.content;
+
+        crow::json::wvalue notesJson;
+        for (const auto& pair : c.playerNotes) {
+            notesJson[pair.first] = pair.second;
+        }
+        cj["playerNotes"] = std::move(notesJson);
+
+        cluesJson.push_back(cj);
+    }
+    json["discoveredClues"] = std::move(cluesJson);
+
+    sessionManager->broadcastToSession(sessionId, json.dump());
+}
 
 void HttpServer::broadcastLobbyState(const std::string& sessionId) {
     auto lobbyOpt = storage->getLobby(sessionId);

@@ -5,7 +5,7 @@
 #include <memory>
 #include <algorithm>
 #include <chrono>
-#include <print> // Moderno C++23
+#include <print>
 
 namespace FindTheBug {
 
@@ -14,6 +14,11 @@ namespace FindTheBug {
         std::shared_ptr<MongoStore> storage;
         ActionSystem actionSystem;
         ValidationSystem validationSystem;
+        void advanceTurn(GameState& state) {
+            if (state.turnOrder.empty()) return;
+            state.currentTurnIndex = (state.currentTurnIndex + 1) % state.turnOrder.size();
+            state.turnStartTime = std::chrono::system_clock::now();
+        }
     };
 
     GameEngine::GameEngine(std::shared_ptr<MongoStore> storage)
@@ -30,7 +35,7 @@ namespace FindTheBug {
     bool GameEngine::initializeGameFromLobby(
         const std::string& sessionId,
         const std::string& caseId,
-        const std::vector<std::string>& playerNames,
+        const std::vector<std::string>& allParticipants,
         const std::string& hostPlayerId,
         const std::string& masterPlayerId
     ) {
@@ -40,14 +45,24 @@ namespace FindTheBug {
             return false;
         }
 
+
+
         GameState initialState;
+
+        for (const auto& pid : allParticipants) {
+            if (pid != masterPlayerId) {
+                initialState.turnOrder.push_back(pid);
+            }
+        }
+        initialState.currentTurnIndex = 0;
+        initialState.turnStartTime = std::chrono::system_clock::now();
         initialState.sessionId = sessionId;
         initialState.currentCaseId = caseId;
         initialState.currentDay = 1;
         initialState.remainingPoints = 12;
         initialState.isCompleted = false;
         initialState.isSuddenDeath = false;
-        initialState.playerIds = playerNames;
+        initialState.playerIds = allParticipants;
         initialState.hostPlayerId = hostPlayerId;
         initialState.masterPlayerId = masterPlayerId;
 
@@ -72,7 +87,7 @@ namespace FindTheBug {
         }
 
         if (playerId == state.masterPlayerId) {
-            return { .success = false, .newState = state, .message = "O Mestre não pode realizar ações de investigação." };
+            return { .success = false, .newState = state, .message = "O Mestre nao pode realizar acoes de investigacao." };
         }
 
         auto bugCaseOpt = pImpl->storage->getCase(state.currentCaseId);
@@ -83,7 +98,17 @@ namespace FindTheBug {
 
         if (state.isSuddenDeath && actionType != ActionType::SubmitSolution) {
             return { .success = false, .newState = state,
-                     .message = "MODO MORTE SUBITA: Apenas submissao de solucao e permitida!" };
+                     .message = "MODO MORTE SUBITA: Apenas submissao de solucao permitida!" };
+        }
+
+        if (actionType != ActionType::SubmitSolution) {
+            if (!state.turnOrder.empty()) {
+                std::string currentPlayer = state.turnOrder[state.currentTurnIndex];
+                if (playerId != currentPlayer) {
+                    // AQUI ESTAVA O ERRO: "Não" -> "Nao"
+                    return { .success = false, .newState = state, .message = "Nao e seu turno. Vez de: " + currentPlayer };
+                }
+            }
         }
 
         auto actionResult = pImpl->actionSystem.execute(
@@ -100,7 +125,23 @@ namespace FindTheBug {
         state.remainingPoints -= actionResult.pointsSpent;
 
         if (actionResult.unlockedClue) {
-            state.discoveredClues.push_back(*actionResult.unlockedClue);
+            bool alreadyExists = false;
+            for (const auto& existing : state.discoveredClues) {
+                if (existing.id == actionResult.unlockedClue->id) {
+                    alreadyExists = true;
+                    break;
+                }
+            }
+
+            if (!alreadyExists) {
+                DiscoveredClue dc;
+                dc.id = actionResult.unlockedClue->id;
+                dc.targetId = actionResult.unlockedClue->targetId;
+                dc.type = actionResult.unlockedClue->type;
+                dc.targetType = actionResult.unlockedClue->targetType;
+                dc.content = actionResult.unlockedClue->content;
+                state.discoveredClues.push_back(dc);
+            }
         }
 
         if (actionType == ActionType::InvestigateFunction) {
@@ -117,6 +158,11 @@ namespace FindTheBug {
             .timestamp = std::chrono::system_clock::now()
             });
 
+        if (actionResult.pointsSpent > 0 && !state.turnOrder.empty()) {
+            state.currentTurnIndex = (state.currentTurnIndex + 1) % state.turnOrder.size();
+            state.turnStartTime = std::chrono::system_clock::now();
+        }
+
         if (state.remainingPoints <= 0) {
             if (state.currentDay >= 5) {
                 state.isSuddenDeath = true;
@@ -129,11 +175,40 @@ namespace FindTheBug {
         }
 
         if (pImpl->storage->saveGameState(state)) {
-            return { .success = true, .newState = state, .message = actionResult.message };
+            return {
+                .success = true,
+                .newState = state,
+                .message = actionResult.message,
+                .revealedClue = actionResult.unlockedClue
+            };
         }
         else {
             return { .success = false, .newState = state, .message = "Erro critico ao salvar estado no banco." };
         }
+    }
+
+    bool GameEngine::savePlayerNote(
+        const std::string& sessionId,
+        const std::string& playerId,
+        const std::string& clueId,
+        const std::string& content
+    ) {
+        auto stateOpt = pImpl->storage->getGameState(sessionId);
+        if (!stateOpt) return false;
+        auto state = *stateOpt;
+
+        bool found = false;
+        for (auto& dc : state.discoveredClues) {
+            if (dc.id == clueId) {
+                dc.playerNotes[playerId] = content;
+                found = true;
+                break;
+            }
+        }
+
+        if (!found) return false;
+
+        return pImpl->storage->saveGameState(state);
     }
 
     ValidationResult GameEngine::submitToMaster(

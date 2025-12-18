@@ -36,6 +36,13 @@ namespace FindTheBug {
 
         GameResult finalizeSession(const std::string& sessionId, bool approvedByMaster);
 
+        bool savePlayerNote(
+            const std::string& sessionId,
+            const std::string& playerId,
+            const std::string& clueId,
+            const std::string& content
+        );
+
         std::shared_ptr<MongoStore> getStorage() const;
 
     private:

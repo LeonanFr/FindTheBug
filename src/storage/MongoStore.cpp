@@ -214,7 +214,6 @@ std::optional<BugCase> MongoStore::getCase(const std::string& caseId) const {
         auto collection = db["cases"];
 
         auto result = collection.find_one(document{} << "id" << caseId << finalize);
-
         if (!result) return std::nullopt;
 
         auto view = result->view();
@@ -224,15 +223,37 @@ std::optional<BugCase> MongoStore::getCase(const std::string& caseId) const {
         if (view["title"]) bc.title = std::string(view["title"].get_string().value);
         if (view["description"]) bc.description = std::string(view["description"].get_string().value);
 
-        if (view["solutionQuestions"] && view["solutionQuestions"].type() == bsoncxx::type::k_array) {
-            for (const auto& elem : view["solutionQuestions"].get_array().value) {
-                bc.solutionQuestions.push_back(std::string(elem.get_string().value));
-            }
-        }
+        if (view["systemTopology"] && view["systemTopology"].type() == bsoncxx::type::k_document) {
+            auto topoView = view["systemTopology"].get_document().view();
 
-        if (view["correctAnswers"] && view["correctAnswers"].type() == bsoncxx::type::k_array) {
-            for (const auto& elem : view["correctAnswers"].get_array().value) {
-                bc.correctAnswers.push_back(std::string(elem.get_string().value));
+            if (topoView["modules"] && topoView["modules"].type() == bsoncxx::type::k_array) {
+                for (const auto& el : topoView["modules"].get_array().value) {
+                    auto doc = el.get_document().view();
+                    ModuleNode m;
+                    if (doc["name"]) m.name = std::string(doc["name"].get_string().value);
+                    bc.systemTopology.modules.push_back(m);
+                }
+            }
+
+            if (topoView["functions"] && topoView["functions"].type() == bsoncxx::type::k_array) {
+                for (const auto& el : topoView["functions"].get_array().value) {
+                    auto doc = el.get_document().view();
+                    FunctionNode f;
+                    if (doc["name"]) f.name = std::string(doc["name"].get_string().value);
+                    if (doc["parentId"]) f.parentId = std::string(doc["parentId"].get_string().value);
+                    bc.systemTopology.functions.push_back(f);
+                }
+            }
+
+            if (topoView["connections"] && topoView["connections"].type() == bsoncxx::type::k_array) {
+                for (const auto& el : topoView["connections"].get_array().value) {
+                    auto doc = el.get_document().view();
+                    ConnectionNode c;
+                    if (doc["id"]) c.id = std::string(doc["id"].get_string().value);
+                    if (doc["from"]) c.from = std::string(doc["from"].get_string().value);
+                    if (doc["to"]) c.to = std::string(doc["to"].get_string().value);
+                    bc.systemTopology.connections.push_back(c);
+                }
             }
         }
 
@@ -250,10 +271,21 @@ std::optional<BugCase> MongoStore::getCase(const std::string& caseId) const {
             }
         }
 
+        if (view["solutionQuestions"] && view["solutionQuestions"].type() == bsoncxx::type::k_array) {
+            for (const auto& elem : view["solutionQuestions"].get_array().value) {
+                bc.solutionQuestions.push_back(std::string(elem.get_string().value));
+            }
+        }
+
+        if (view["correctAnswers"] && view["correctAnswers"].type() == bsoncxx::type::k_array) {
+            for (const auto& elem : view["correctAnswers"].get_array().value) {
+                bc.correctAnswers.push_back(std::string(elem.get_string().value));
+            }
+        }
+
         return bc;
     }
-    catch (const std::exception& e) {
-        std::print("[MONGO] Error in getCase: {}\n", e.what());
+    catch (...) {
         return std::nullopt;
     }
 }
@@ -279,6 +311,14 @@ std::optional<GameState> MongoStore::getGameState(const std::string& sessionId) 
         if (view["hostPlayerId"]) gs.hostPlayerId = std::string(view["hostPlayerId"].get_string().value);
         if (view["masterPlayerId"]) gs.masterPlayerId = std::string(view["masterPlayerId"].get_string().value);
 
+        if (view["currentTurnIndex"]) gs.currentTurnIndex = view["currentTurnIndex"].get_int32().value;
+
+        if (view["turnOrder"] && view["turnOrder"].type() == bsoncxx::type::k_array) {
+            for (const auto& elem : view["turnOrder"].get_array().value) {
+                gs.turnOrder.push_back(std::string(elem.get_string().value));
+            }
+        }
+
         if (view["playerIds"] && view["playerIds"].type() == bsoncxx::type::k_array) {
             for (const auto& elem : view["playerIds"].get_array().value) {
                 gs.playerIds.push_back(std::string(elem.get_string().value));
@@ -299,14 +339,24 @@ std::optional<GameState> MongoStore::getGameState(const std::string& sessionId) 
 
         if (view["discoveredClues"] && view["discoveredClues"].type() == bsoncxx::type::k_array) {
             for (const auto& elem : view["discoveredClues"].get_array().value) {
-                Clue c;
+                DiscoveredClue c; // Note: Usando DiscoveredClue, não Clue
                 auto doc = elem.get_document().view();
+
                 if (doc["id"]) c.id = std::string(doc["id"].get_string().value);
                 if (doc["targetId"]) c.targetId = std::string(doc["targetId"].get_string().value);
                 if (doc["targetType"]) c.targetType = static_cast<TargetType>(doc["targetType"].get_int32().value);
                 if (doc["type"]) c.type = static_cast<ClueType>(doc["type"].get_int32().value);
                 if (doc["content"]) c.content = std::string(doc["content"].get_string().value);
-                if (doc["cost"]) c.cost = doc["cost"].get_int32().value;
+
+                if (doc["playerNotes"] && doc["playerNotes"].type() == bsoncxx::type::k_document) {
+                    auto notesView = doc["playerNotes"].get_document().view();
+                    for (auto note : notesView) {
+                        std::string pId(note.key());
+                        std::string txt(note.get_string().value);
+                        c.playerNotes[pId] = txt;
+                    }
+                }
+
                 gs.discoveredClues.push_back(c);
             }
         }
@@ -317,6 +367,44 @@ std::optional<GameState> MongoStore::getGameState(const std::string& sessionId) 
         std::print("[MONGO] Error in getGameState: {}\n", e.what());
         return std::nullopt;
     }
+}
+
+std::vector<CaseSummary> FindTheBug::MongoStore::listAvailableCases() const
+{
+    std::vector<CaseSummary> summaries;
+
+    try {
+        auto conn = pImpl->acquire();
+        auto db = (*conn)[pImpl->dbName];
+        auto collection = db["cases"];
+
+        mongocxx::options::find opts;
+        
+        opts.projection(document{}
+            << "id" << 1
+            << "title" << 1
+            << "shortDescription" << 1
+            << "_id" << 0
+            << finalize);
+
+        auto cursor = collection.find({}, opts);
+
+        for (auto&& doc : cursor) {
+            CaseSummary s;
+            if (doc["id"]) s.id = std::string(doc["id"].get_string().value);
+            if (doc["title"]) s.id = std::string(doc["title"].get_string().value);
+            if (doc["shortDescription"])
+                s.shortDescription = std::string(doc["shortDescription"].get_string().value);
+            else
+                s.shortDescription = "Sem descricao disponivel.";
+
+            summaries.push_back(s);
+        }
+    }
+    catch (const std::exception& e) {
+        std::print("[MONGO] Erro ao listar casos: {}\n", e.what());
+    }
+    return summaries;
 }
 
 bool MongoStore::saveGameState(const GameState& state) {
@@ -334,15 +422,24 @@ bool MongoStore::saveGameState(const GameState& state) {
         bsoncxx::builder::stream::array player_ids_array;
         for (const auto& playerId : state.playerIds) player_ids_array << playerId;
 
+        bsoncxx::builder::stream::array turn_order_array;
+        for (const auto& pid : state.turnOrder) turn_order_array << pid;
+
         bsoncxx::builder::stream::array clues_array;
         for (const auto& clue : state.discoveredClues) {
+
+            bsoncxx::builder::stream::document notes_doc;
+            for (const auto& pair : clue.playerNotes) {
+                notes_doc << pair.first << pair.second;
+            }
+
             clues_array << bsoncxx::builder::stream::open_document
                 << "id" << clue.id
                 << "targetId" << clue.targetId
                 << "targetType" << static_cast<int>(clue.targetType)
                 << "type" << static_cast<int>(clue.type)
                 << "content" << clue.content
-                << "cost" << clue.cost
+                << "playerNotes" << notes_doc
                 << bsoncxx::builder::stream::close_document;
         }
 
@@ -354,7 +451,9 @@ bool MongoStore::saveGameState(const GameState& state) {
             << "isSuddenDeath" << state.isSuddenDeath
             << "playerIds" << player_ids_array
             << "hostPlayerId" << state.hostPlayerId
-            << "masterPlayerId" << state.masterPlayerId
+            << "currentTurnIndex" << state.currentTurnIndex
+            << "turnOrder" << turn_order_array
+
             << "discoveredClues" << clues_array
             << "investigatedTargets" << inv_array
             << "breakpointedTargets" << bp_array

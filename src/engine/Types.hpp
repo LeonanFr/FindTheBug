@@ -17,6 +17,7 @@ namespace FindTheBug {
 		bool success{ false };
 		GameState newState;
 		std::string message;
+		std::optional<Clue> revealedClue;
 	};
 
 	struct ValidationResult {

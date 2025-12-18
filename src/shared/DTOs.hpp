@@ -17,6 +17,15 @@ namespace FindTheBug {
 		Finished
 	};
 
+	struct DiscoveredClue {
+		std::string id;
+		std::string targetId;
+		ClueType type;
+		TargetType targetType;
+		std::string content;
+		std::map<std::string, std::string> playerNotes;
+	};
+
 	struct PlayerAction {
 		std::string playerId;
 		ActionType actionType;
@@ -33,6 +42,27 @@ namespace FindTheBug {
 		int cost{ 0 };
 	};
 
+	struct ModuleNode {
+		std::string name;
+	};
+
+	struct FunctionNode {
+		std::string name;
+		std::string parentId;
+	};
+
+	struct ConnectionNode {
+		std::string id;
+		std::string from;
+		std::string to;
+	};
+
+	struct SystemTopology {
+		std::vector<ModuleNode> modules;
+		std::vector<FunctionNode> functions;
+		std::vector<ConnectionNode> connections;
+	};
+
 	struct BugCase {
 		std::string id;
 		std::string title;
@@ -42,6 +72,13 @@ namespace FindTheBug {
 		std::vector<std::string> correctAnswers;
 
 		std::vector<Clue> availableClues;
+		SystemTopology systemTopology;
+	};
+
+	struct CaseSummary {
+		std::string id;
+		std::string title;
+		std::string shortDescription;
 	};
 
 	struct GameState {
@@ -52,21 +89,28 @@ namespace FindTheBug {
 		bool isCompleted{ false };
 		bool isSuddenDeath{ false };
 
-		std::vector<Clue> discoveredClues;
+		std::vector<DiscoveredClue> discoveredClues;
 		std::vector<PlayerAction> actionHistory;
 
 		std::unordered_set<std::string> investigatedTargets;
 		std::unordered_set<std::string> breakpointedTargets;
 
+		// Jogadores
 		std::vector<std::string> playerIds;
 		std::string hostPlayerId;
 		std::string masterPlayerId;
+
+		// Turno
+		std::vector<std::string> turnOrder;
+		int currentTurnIndex;
+		std::chrono::system_clock::time_point turnStartTime;
+
 	};
 
 	struct PlayerInfo {
 		std::string id;
 		std::string name;
-		PlayerRole role;
+		PlayerRole role{PlayerRole::Player};
 		std::string connectionId;
 		std::chrono::system_clock::time_point joinedAt;
 
