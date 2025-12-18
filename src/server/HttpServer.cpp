@@ -1,392 +1,424 @@
 #define NOMINMAX 
 
-#include <functional>
-#include "crow.h"
 #include "HttpServer.hpp"
+#include <functional>
+#include <iostream>
+#include <print>
+#include <random>
+#include <sstream>
+#include <iomanip>
 
 using namespace FindTheBug;
 
-crow::json::wvalue stateToJSON(const GameState& state) {
-    crow::json::wvalue json;
-
-    json["sessionId"] = state.sessionId;
-    json["currentCaseId"] = state.currentCaseId;
-    json["currentDay"] = state.currentDay;
-    json["remainingPoints"] = state.remainingPoints;
-    json["isCompleted"] = state.isCompleted;
-
-    std::vector<crow::json::wvalue> cluesJson;
-    for (const auto& clue : state.discoveredClues) {
-        crow::json::wvalue c;
-        c["id"] = clue.id;
-        c["targetId"] = clue.targetId;
-        c["content"] = clue.content;
-        c["type"] = static_cast<int>(clue.type);
-        cluesJson.push_back(std::move(c));
+static std::string escapeJSON(const std::string& s) {
+    std::ostringstream o;
+    for (auto c : s) {
+        if (c == '"') o << "\\\"";
+        else if (c == '\\') o << "\\\\";
+        else if ((unsigned char)c < 0x20) o << "\\u" << std::hex << std::setw(4) << std::setfill('0') << (int)c;
+        else o << c;
     }
-    json["discoveredClues"] = std::move(cluesJson);
-
-    std::vector<crow::json::wvalue> historyJson;
-    for (const auto& action : state.actionHistory) {
-        crow::json::wvalue a;
-        a["playerId"] = action.playerId;
-        a["type"] = static_cast<int>(action.actionType);
-        a["targetId"] = action.targetId;
-        historyJson.push_back(std::move(a));
-    }
-    json["actionHistory"] = std::move(historyJson);
-
-    return json;
+    return o.str();
 }
 
-HttpServer::HttpServer(std::shared_ptr<GameEngine> engine)
-    : engine{ std::move(engine) },
-    sessionManager{ std::make_shared<SessionManager>() } {
+HttpServer::HttpServer(
+    std::shared_ptr<GameEngine> engine,
+    std::shared_ptr<MongoStore> storage,
+    std::shared_ptr<SessionManager> sessionManager,
+    std::shared_ptr<TaskQueue> taskQueue
+) : engine(std::move(engine)),
+storage(std::move(storage)),
+sessionManager(std::move(sessionManager)),
+taskQueue(std::move(taskQueue))
+{
+    SessionManager::log("[INIT] HttpServer inicializado com fila de tarefas.");
 }
 
 void HttpServer::run(uint16_t port) {
+
+    SessionManager::log("[DEBUG] HttpServer::run iniciando na porta " + std::to_string(port));
+
     crow::SimpleApp app;
 
-    auto actionHandler = std::bind(&HttpServer::handleAction, this, std::placeholders::_1);
+    CROW_ROUTE(app, "/action").methods(crow::HTTPMethod::POST)
+        ([this](const crow::request& req) {
 
-    CROW_ROUTE(app, "/action")
-        .methods(crow::HTTPMethod::POST)
-        (actionHandler);
+        SessionManager::log("[HTTP] /action recebido");
+
+        return this->handleAction(req);
+
+            });
+
 
     auto wsOpenHandler = std::bind(&HttpServer::handleWebSocketOpen, this, std::placeholders::_1);
-    auto wsCloseHandler = std::bind(&HttpServer::handleWebSocketClose, this, std::placeholders::_1, std::placeholders::_2);
-    auto wsMessageHandler = std::bind(&HttpServer::handleWebSocketMessage, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3);
+    auto wsCloseHandler = std::bind(&HttpServer::handleWebSocketClose, this,
+        std::placeholders::_1, std::placeholders::_2);
+    auto wsMessageHandler = std::bind(&HttpServer::handleWebSocketMessage, this,
+        std::placeholders::_1, std::placeholders::_2,
+        std::placeholders::_3);
 
     CROW_WEBSOCKET_ROUTE(app, "/ws")
         .onopen(wsOpenHandler)
         .onclose(wsCloseHandler)
         .onmessage(wsMessageHandler);
 
+    SessionManager::log("[DEBUG] Servidor iniciando...");
+
     app.port(port).multithreaded().run();
+
 }
 
-crow::response HttpServer::handleAction(const crow::request& req) {
-    auto body = crow::json::load(req.body);
-    if (!body) return crow::response(400, "Invalid JSON");
-
-    auto result = engine->processAction(
-        body["playerId"].s(),
-        static_cast<ActionType>(body["actionType"].i()),
-        body["targetId"].s(),
-        body["sessionId"].s()
-    );
-
-    crow::json::wvalue response;
-    response["success"] = result.success;
-    response["message"] = result.message;
-    response["state"] = stateToJSON(result.newState);
-
-    return crow::response(200, response);
-}
+// Handlers WebSocket
 
 void HttpServer::handleWebSocketOpen(crow::websocket::connection& conn) {
-    CROW_LOG_INFO << "Conexão WebSocket aberta";
+    SessionManager::log("[WS] Nova conexao: " + std::to_string((uintptr_t)&conn));
 }
 
 void HttpServer::handleWebSocketClose(crow::websocket::connection& conn, const std::string& reason) {
-    sessionManager->leaveLobby(&conn);
+    sessionManager->unregisterConnection(&conn);
+    SessionManager::log("[WS] Fechado (" + reason + ")");
 }
 
-void HttpServer::sendJsonResponse(crow::websocket::connection& conn,
-    const std::string& type,
-    const crow::json::wvalue& data) {
- 
-    crow::json::wvalue response = data;
-    response["type"] = type;
+void HttpServer::handleWebSocketMessage(crow::websocket::connection& conn, const std::string& data, bool is_binary) {
+    if (is_binary) return;
 
-    conn.send_text(response.dump());
-}
-
-void HttpServer::handleCreateLobby(crow::websocket::connection& conn,
-    const crow::json::rvalue& msg) {
- 
-	std::string playerName = msg["playerName"].s();
-
-    if (playerName.empty()) {
-        sendJsonResponse(conn, "ERROR", { {"message", "Nome do jogador não pode ser vazio."} });
-        return;
-    }
-
-    std::string sessionId = sessionManager->createLobby(playerName, &conn);
-
-    if (!sessionId.empty()) {
-        sendJsonResponse(conn, "LOBBY_CREATED", {
-            {"sessionId", sessionId},
-            {"playerName", playerName},
-            {"role", static_cast<int>(PlayerRole::Host)}
-            });
-    }
-    else sendJsonResponse(conn, "ERROR", { {"message", "Falha ao criar lobby."} });
-}
-
-void HttpServer::handleJoinAsPlayer(crow::websocket::connection& conn,
-    const crow::json::rvalue& msg) {
-    
-    std::string sessionId = msg["sessionId"].s();
-    std::string playerName = msg["playerName"].s();
-
-    if (playerName.empty()) {
-        sendJsonResponse(conn, "ERROR", { {"message", "Nome do jogador não pode ser vazio."} });
-        return;
-    }
-    
-    bool success = sessionManager->joinAsPlayer(sessionId, playerName, &conn);
-
-    if (success) {
-        sendJsonResponse(conn, "JOINED_LOBBY", {
-            {"sessionId", sessionId},
-            {"playerName", playerName},
-            {"role", static_cast<int>(PlayerRole::Player)}
-            });
-    }
-    else sendJsonResponse(conn, "ERROR", {
-        {"message", "Não foi possível entrar no lobbu (código inválido, nome já em uso ou lobby cheio.)"}
-        });
-
-}
-
-void HttpServer::handleJoinAsMaster(crow::websocket::connection& conn,
-    const crow::json::rvalue& msg) {
-    
-    std::string sessionId = msg["sessionId"].s();
-    std::string masterName = msg["masterName"].s();
-
-    if (masterName.empty()) {
-        sendJsonResponse(conn, "ERROR", { {
-                "message", "Nome do mestre não pode ser vazio."
-} });
-        return;
-    }
-
-    bool success = sessionManager->joinAsMaster(sessionId, masterName, &conn);
-
-    if (success)
-        sendJsonResponse(conn, "JOINED_LOBBY", {
-            {"sessionId", sessionId},
-            {"playerName", masterName},
-            {"role", static_cast<int>(PlayerRole::Master)}
-            });
-    else
-        sendJsonResponse(conn, "ERROR", {
-            {"message", "Não foi possível entrar como mestre (código inválido ou já há um mestre)"}
-            });
-
-}
-
-void HttpServer::handleLeaveLobby(crow::websocket::connection& conn,
-    const crow::json::rvalue& msg) {
-
-    sessionManager->leaveLobby(&conn);
-    sendJsonResponse(conn, "LEFT_LOBBY");
-}
-
-void HttpServer::handleStartGame(crow::websocket::connection& conn,
-    const crow::json::rvalue& msg) {
-    
-    std::string sessionId = msg["sessionId"].s();
-    std::optional<std::string> caseId;
-
-    if (msg.has("caseId")) caseId = msg["caseId"].s();
-
-    auto lobby = sessionManager->getLobby(sessionId);
-    if(!lobby){
-        sendJsonResponse(conn, "ERROR", {
-            {"message", "Lobby não encontrado."}
-            });
-        return;
-    }
-
-    auto* host = lobby->getHost();
-    if (!host || host->connection != &conn) {
-        sendJsonResponse(conn, "ERROR", {
-            {"message", "Apenas o host pode iniciar o jogo."}
-            });
-        return;
-    }
-
-    if (!lobby->canStartGame()) {
-        sendJsonResponse(conn, "ERROR", {
-            {"message", "Não é possível iniciar o jogo (necessário pelo menos 2 jogadores e um mestre)."}
-            });
-        return;
-    }
-
-    std::string actualCaseId = caseId.value_or("case_robotics_001");
-
-    std::vector<std::string> playerNames;
-    std::string hostPlayerId;
-
-    for (const auto& player : lobby->players) {
-        if (player.role == PlayerRole::Master) continue;
-
-        playerNames.push_back(player.name);
-        if (player.role == PlayerRole::Host) hostPlayerId = player.name;
-    }
-
-    bool initialized = engine->initializeGameFromLobby(
-        sessionId,
-        actualCaseId,
-        playerNames,
-        hostPlayerId
-    );
-
-    if (!initialized) {
-        sendJsonResponse(conn, "ERROR", {
-            {"message", "Falha ao inicializar o jogo. Verifique se o caso existe no banco de dados."}
-            });
-        return;
-    }
-
-    bool phaseUpdated = sessionManager->updateLobbyPhase(sessionId, GamePhase::Investigation);
-
-    if (!phaseUpdated) {
-        sendJsonResponse(conn, "ERROR", {
-            {"message", "Falha ao atualizar fase do lobby."}
-            });
-        return;
-    }
-
-    crow::json::wvalue notification;
-    notification["type"] = "GAME_STARTED";
-    notification["sessionId"] = sessionId;
-    notification["caseId"] = actualCaseId;
-    notification["players"] = crow::json::wvalue::list();
-
-    for (size_t i = 0; i < playerNames.size(); ++i) notification["players"][i] = playerNames[i];
-
-    auto players = lobby->players;
-    std::string notificationStr = notification.dump();
-
-    for (const auto& player : players)
-        if (player.connection)
-            player.connection->send_text(notificationStr);
-
-    sendJsonResponse(conn, "GAME_STARTED", {
-        {"sessionId", sessionId},
-        {"caseId", actualCaseId},
-        {"initialized", true},
-        {"phaseUpdated", phaseUpdated}
-        });
-}
-
-void HttpServer::handleGetLobbyInfo(crow::websocket::connection& conn,
-    const crow::json::rvalue& msg) {
-
-    std::string sessionId = msg["sessionId"].s();
-    auto lobby = sessionManager->getLobby(sessionId);
-
-    if (!lobby) {
-        sendJsonResponse(conn, "LOBBY_INFO", {
-            {"exists", false}
-            });
-        return;
-    }
-
-    std::vector<crow::json::wvalue> playersJson;
-    for (const auto& player : lobby->players) {
-        if (player.role != PlayerRole::Master) {
-            crow::json::wvalue playerJson;
-            playerJson["name"] = player.name;
-            playerJson["role"] = static_cast<int>(player.role);
-            playersJson.push_back(std::move(playerJson));
-        }
-    }
-
-    std::string masterName;
-    auto* master = lobby->getMaster();
-    if (master) {
-        masterName = master->name;
-    }
-
-    sendJsonResponse(conn, "LOBBY_INFO", {
-        {"exists", true},
-        {"sessionId", lobby->sessionId},
-        {"phase", static_cast<int>(lobby->phase)},
-        {"canStart", lobby->canStartGame()},
-        {"playerCount", lobby->playerCount()},
-        {"players", std::move(playersJson)},
-        {"masterName", masterName}
-        });
-
-}
-
-void HttpServer::handleWebSocketMessage(crow::websocket::connection& conn,
-    const std::string& data, bool is_binary) {
-    auto msg = crow::json::load(data);
-    if (!msg) return;
-
-    std::string type = msg["type"].s();
-
-
-    if (type == "CREATE_LOBBY") {
-        handleCreateLobby(conn, msg);
-    }
-    else if (type == "JOIN_AS_PLAYER") {
-        handleJoinAsPlayer(conn, msg);
-    }
-    else if (type == "JOIN_AS_MASTER") {
-        handleJoinAsMaster(conn, msg);
-    }
-    else if (type == "LEAVE_LOBBY") {
-        handleLeaveLobby(conn, msg);
-    }
-    else if (type == "START_GAME") {
-        handleStartGame(conn, msg);
-    }
-    else if (type == "GET_LOBBY_INFO") {
-        handleGetLobbyInfo(conn, msg);
-    }
-
-    else if (type == "SUBMIT_SOLUTION") {
-        std::string sessionId = msg["sessionId"].s();
-        std::vector<std::string> answers;
-
-        for (const auto& a : msg["answers"]) {
-            answers.push_back(a.s());
+    try {
+        auto msg = crow::json::load(data);
+        if (!msg || !msg.has("type")) {
+            SessionManager::sendTo(&conn, "{\"type\":\"ERROR\",\"message\":\"Invalid JSON\"}");
+            return;
         }
 
-        auto validation = engine->submitToMaster(sessionId, answers);
+        std::string type = msg["type"].s();
 
-        auto* masterConn = sessionManager->getMasterConnection(sessionId);
-        if (masterConn) {
-            crow::json::wvalue toMaster;
-            toMaster["type"] = "SOLUTION_SUBMITTED";
-            toMaster["answers"] = answers;
-            toMaster["sessionId"] = sessionId;
+        if (type == "CREATE_LOBBY") {
+            if (msg.has("playerName"))
+                processCreateLobby(&conn, msg["playerName"].s());
+        }
+        else if (type == "JOIN_AS_PLAYER") {
+            if (msg.has("sessionId") && msg.has("playerName"))
+                processJoinAsPlayer(&conn, msg["sessionId"].s(), msg["playerName"].s());
+        }
+        else if (type == "JOIN_AS_MASTER") {
+            if (msg.has("sessionId") && msg.has("masterName"))
+                processJoinAsMaster(&conn, msg["sessionId"].s(), msg["masterName"].s());
+        }
+        else if (type == "GET_LOBBY_INFO") {
+            if (msg.has("sessionId"))
+                processGetLobbyInfo(&conn, msg["sessionId"].s());
+        }
+        else if (type == "START_GAME") {
 
-            std::vector<crow::json::wvalue> feedbackJson;
-            for (const auto& f : validation.feedbackPerQuestion) {
-                feedbackJson.push_back(f);
+            std::string caseId = msg.has("caseId") ? msg["caseId"].s() : std::string("case_robotics_001");
+            std::string pName = msg.has("playerName") ? msg["playerName"].s() : std::string("");
+
+            if (msg.has("sessionId") && !pName.empty())
+                processStartGame(&conn, msg["sessionId"].s(), pName, caseId);
+            else
+                SessionManager::sendTo(&conn, "{\"type\":\"ERROR\",\"message\":\"START_GAME requer sessionId e playerName\"}");
+        }
+        else if (type == "SUBMIT_SOLUTION") {
+            if (msg.has("sessionId") && msg.has("answers")) {
+                std::vector<std::string> answers;
+                for (const auto& a : msg["answers"]) answers.push_back(a.s());
+                processSubmitSolution(&conn, msg["sessionId"].s(), answers);
             }
-            toMaster["feedbackPerQuestion"] = std::move(feedbackJson);
-
-            masterConn->send_text(toMaster.dump());
+        }
+        else if (type == "VALIDATE_SOLUTION") {
+            if (msg.has("sessionId") && msg.has("approved")) {
+                processValidateSolution(&conn, msg["sessionId"].s(), msg["approved"].b());
+            }
+        }
+        else if (type == "LEAVE_LOBBY") {
+            sessionManager->unregisterConnection(&conn);
         }
     }
-    else if (type == "MASTER_DECISION") {
-        std::string sessionId = msg["sessionId"].s();
-        bool victory = msg["victory"].b();
+    catch (const std::exception& e) {
+        SessionManager::log("[WS] Erro parsing: " + std::string(e.what()));
+    }
+}
 
-        engine->finalizeSession(sessionId, victory);
+// Lógica Assíncrona (TaskQueue)
 
-        crow::json::wvalue response;
-        response["type"] = "DECISION_RESULT";
-        response["victory"] = victory;
+void HttpServer::processCreateLobby(crow::websocket::connection* conn, const std::string& playerName) {
+    std::string sessionId = generateSessionId();
 
-        auto players = sessionManager->getPlayerConnections(sessionId);
-        for (auto* p_conn : players) {
-            p_conn->send_text(response.dump());
+    taskQueue->enqueue([this, conn, sessionId, playerName]() {
+        PlayerInfo host;
+        host.name = playerName;
+        host.role = PlayerRole::Host;
+        host.joinedAt = std::chrono::system_clock::now();
+
+        if (storage->createLobby(sessionId, host)) {
+            sessionManager->registerConnection(sessionId, conn);
+
+            std::string resp = std::format(
+                "{{\"type\":\"LOBBY_CREATED\",\"sessionId\":\"{}\",\"playerName\":\"{}\",\"role\":{}}}",
+                sessionId, escapeJSON(playerName), (int)PlayerRole::Host
+            );
+            SessionManager::sendTo(conn, resp);
+
+            SessionManager::log("[LOBBY] Criado: " + sessionId);
         }
-    }
+        else {
+            SessionManager::sendTo(conn, "{\"type\":\"ERROR\",\"message\":\"Falha ao criar lobby no DB\"}");
+        }
+        });
+}
 
-    else {
-        sendJsonResponse(conn, "ERROR", {
-            {"message", "Tipo de mensagem não reconhecido: " + type}
-            });
+void HttpServer::processJoinAsPlayer(crow::websocket::connection* conn, const std::string& sessionId, const std::string& playerName) {
+    taskQueue->enqueue([this, conn, sessionId, playerName]() {
+        if (!storage->sessionExists(sessionId)) {
+            SessionManager::sendTo(conn, "{\"type\":\"ERROR\",\"message\":\"Lobby nao encontrado\"}");
+            return;
+        }
+
+        PlayerInfo p;
+        p.name = playerName;
+        p.role = PlayerRole::Player;
+        p.joinedAt = std::chrono::system_clock::now();
+
+        if (storage->addPlayerToLobby(sessionId, p)) {
+            sessionManager->registerConnection(sessionId, conn);
+
+            std::string resp = std::format(
+                "{{\"type\":\"JOINED_LOBBY\",\"sessionId\":\"{}\",\"playerName\":\"{}\",\"role\":{}}}",
+                sessionId, escapeJSON(playerName), (int)PlayerRole::Player
+            );
+            SessionManager::sendTo(conn, resp);
+
+            broadcastLobbyState(sessionId);
+        }
+        else {
+            SessionManager::sendTo(conn, "{\"type\":\"ERROR\",\"message\":\"Nao foi possivel entrar (Nome em uso ou erro DB)\"}");
+        }
+        });
+}
+
+void HttpServer::processJoinAsMaster(crow::websocket::connection* conn, const std::string& sessionId, const std::string& masterName) {
+    taskQueue->enqueue([this, conn, sessionId, masterName]() {
+        if (!storage->sessionExists(sessionId)) {
+            SessionManager::sendTo(conn, "{\"type\":\"ERROR\",\"message\":\"Lobby nao encontrado\"}");
+            return;
+        }
+
+        PlayerInfo m;
+        m.name = masterName;
+        m.role = PlayerRole::Master;
+        m.joinedAt = std::chrono::system_clock::now();
+
+        if (storage->addPlayerToLobby(sessionId, m)) {
+            sessionManager->registerConnection(sessionId, conn);
+
+            std::string resp = std::format(
+                "{{\"type\":\"JOINED_LOBBY\",\"sessionId\":\"{}\",\"playerName\":\"{}\",\"role\":{}}}",
+                sessionId, escapeJSON(masterName), (int)PlayerRole::Master
+            );
+            SessionManager::sendTo(conn, resp);
+
+            broadcastLobbyState(sessionId);
+        }
+        else {
+            SessionManager::sendTo(conn, "{\"type\":\"ERROR\",\"message\":\"Mestre ja existe ou erro\"}");
+        }
+        });
+}
+
+void HttpServer::processGetLobbyInfo(crow::websocket::connection* conn, const std::string& sessionId) {
+    taskQueue->enqueue([this, conn, sessionId]() {
+        auto lobbyOpt = storage->getLobby(sessionId);
+        if (lobbyOpt) {
+            auto& lobby = *lobbyOpt;
+            std::ostringstream oss;
+            oss << "{\"type\":\"LOBBY_INFO\",\"exists\":true,\"sessionId\":\"" << lobby.sessionId << "\",";
+            oss << "\"players\":[";
+            bool first = true;
+            for (const auto& p : lobby.players) {
+                if (!first) oss << ",";
+                oss << "{\"name\":\"" << escapeJSON(p.name) << "\",\"role\":" << (int)p.role << "}";
+                first = false;
+            }
+            oss << "]}";
+            SessionManager::sendTo(conn, oss.str());
+        }
+        else {
+            SessionManager::sendTo(conn, "{\"type\":\"LOBBY_INFO\",\"exists\":false}");
+        }
+        });
+}
+
+void HttpServer::processStartGame(crow::websocket::connection* conn, const std::string& sessionId, const std::string& playerName, const std::string& caseId) {
+    taskQueue->enqueue([this, conn, sessionId, playerName, caseId]() {
+        auto lobbyOpt = storage->getLobby(sessionId);
+        if (!lobbyOpt) {
+            SessionManager::sendTo(conn, "{\"type\":\"ERROR\",\"message\":\"Lobby nao encontrado\"}");
+            return;
+        }
+
+        const auto& lobby = *lobbyOpt;
+
+        bool isHost = false;
+        for (const auto& p : lobby.players) {
+            if (p.name == playerName && p.role == PlayerRole::Host) {
+                isHost = true;
+                break;
+            }
+        }
+
+        if (!isHost) {
+            SessionManager::log("[WARN] Tentativa de inicio por nao-host: " + playerName);
+            SessionManager::sendTo(conn, "{\"type\":\"ERROR\",\"message\":\"Permissao negada. Apenas o Host pode iniciar.\"}");
+            return;
+        }
+
+        if (!lobby.canStartGame()) {
+            SessionManager::sendTo(conn, "{\"type\":\"ERROR\",\"message\":\"Nao e possivel iniciar. Aguardando Mestre ou Jogadores.\"}");
+            return;
+        }
+
+        std::vector<std::string> allParticipants;
+        std::string hostPlayerId;
+        std::string masterPlayerId;
+
+        for (const auto& p : lobby.players) {
+            if (p.role == PlayerRole::Player || p.role == PlayerRole::Host || p.role == PlayerRole::Master) {
+                allParticipants.push_back(p.name);
+            }
+            if (p.role == PlayerRole::Host) {
+                hostPlayerId = p.name;
+            }
+            if (p.role == PlayerRole::Master) {
+                masterPlayerId = p.name;
+            }
+        }
+
+        if (!engine->initializeGameFromLobby(sessionId, caseId, allParticipants, hostPlayerId, masterPlayerId)) {
+            SessionManager::sendTo(conn, "{\"type\":\"ERROR\",\"message\":\"Erro ao criar sessao de jogo no banco.\"}");
+            return;
+        }
+
+        if (storage->updatePhase(sessionId, GamePhase::Investigation)) {
+            std::string msg = std::format(
+                "{{\"type\":\"GAME_STARTED\",\"sessionId\":\"{}\",\"caseId\":\"{}\"}}",
+                sessionId, escapeJSON(caseId)
+            );
+            sessionManager->broadcastToSession(sessionId, msg);
+            SessionManager::log("[GAME] Jogo iniciado pelo Host " + playerName + " na sessao " + sessionId);
+        }
+        });
+}
+
+void HttpServer::processSubmitSolution(crow::websocket::connection* conn, const std::string& sessionId, const std::vector<std::string>& answers) {
+    taskQueue->enqueue([this, conn, sessionId, answers]() {
+        auto gameStateOpt = storage->getGameState(sessionId);
+        if (!gameStateOpt) {
+            SessionManager::sendTo(conn, "{\"type\":\"ERROR\",\"message\":\"Sessao de jogo nao encontrada.\"}");
+            return;
+        }
+
+        auto bugCaseOpt = storage->getCase(gameStateOpt->currentCaseId);
+        if (!bugCaseOpt) {
+            SessionManager::sendTo(conn, "{\"type\":\"ERROR\",\"message\":\"Caso nao encontrado no banco.\"}");
+            return;
+        }
+
+        const auto& bugCase = *bugCaseOpt;
+
+        std::ostringstream oss;
+        oss << "{\"type\":\"SOLUTION_FOR_REVIEW\",";
+        oss << "\"sessionId\":\"" << sessionId << "\",";
+
+        oss << "\"teamAnswers\":[";
+        for (size_t i = 0; i < answers.size(); ++i) {
+            if (i > 0) oss << ",";
+            oss << "\"" << escapeJSON(answers[i]) << "\"";
+        }
+        oss << "],";
+
+        oss << "\"questions\":[";
+        for (size_t i = 0; i < bugCase.solutionQuestions.size(); ++i) {
+            if (i > 0) oss << ",";
+            oss << "\"" << escapeJSON(bugCase.solutionQuestions[i]) << "\"";
+        }
+        oss << "],";
+
+        oss << "\"correctAnswers\":[";
+        for (size_t i = 0; i < bugCase.correctAnswers.size(); ++i) {
+            if (i > 0) oss << ",";
+            oss << "\"" << escapeJSON(bugCase.correctAnswers[i]) << "\"";
+        }
+        oss << "]";
+
+        oss << "}";
+
+        sessionManager->broadcastToSession(sessionId, oss.str());
+
+        SessionManager::log("[GAME] Solucao enviada para revisao do Mestre na sessao: " + sessionId);
+        });
+}
+
+void FindTheBug::HttpServer::processValidateSolution(crow::websocket::connection* conn, const std::string& sessionId, bool approved)
+{
+    taskQueue->enqueue([this, sessionId, approved]() {
+
+        GameResult result = engine->finalizeSession(sessionId, approved);
+
+        if (result == GameResult::Victory) {
+            sessionManager->broadcastToSession(sessionId, "{\"type\":\"GAME_VICTORY\"}");
+            SessionManager::log("[GAME] Vitoria na sessao " + sessionId + ". Encerrando.");
+
+            storage->deleteSession(sessionId);
+            sessionManager->closeSession(sessionId);
+        }
+        else if (result == GameResult::Defeat) {
+            sessionManager->broadcastToSession(sessionId, "{\"type\":\"GAME_OVER\"}");
+            SessionManager::log("[GAME] Derrota na sessao " + sessionId + ". Encerrando.");
+
+            storage->deleteSession(sessionId);
+            sessionManager->closeSession(sessionId);
+        }
+        else {
+            broadcastLobbyState(sessionId);
+
+            sessionManager->broadcastToSession(sessionId, "{\"type\":\"SOLUTION_REJECTED\",\"message\":\"Solucao incorreta. Penalidade aplicada.\"}");
+        }
+        });
+}
+
+// Helpers
+
+void HttpServer::broadcastLobbyState(const std::string& sessionId) {
+    auto lobbyOpt = storage->getLobby(sessionId);
+    if (!lobbyOpt) return;
+
+    auto& lobby = *lobbyOpt;
+    std::ostringstream oss;
+    oss << "{\"type\":\"LOBBY_UPDATE\",\"sessionId\":\"" << lobby.sessionId << "\",";
+    oss << "\"canStart\":" << (lobby.canStartGame() ? "true" : "false") << ",";
+    oss << "\"players\":[";
+
+    bool first = true;
+    for (const auto& p : lobby.players) {
+        if (p.role == PlayerRole::Master) continue;
+        if (!first) oss << ",";
+        oss << "{\"name\":\"" << escapeJSON(p.name) << "\",\"role\":" << (int)p.role << "}";
+        first = false;
     }
+    oss << "]}";
+
+    sessionManager->broadcastToSession(sessionId, oss.str());
+}
+
+std::string HttpServer::generateSessionId() {
+    static const char alphanum[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    std::random_device rd;
+    std::mt19937 gen(rd());
+    std::uniform_int_distribution<> dis(0, sizeof(alphanum) - 2);
+    std::string s;
+    for (int i = 0; i < 6; ++i) s += alphanum[dis(gen)];
+    return s;
+}
+
+crow::response HttpServer::handleAction(const crow::request& req) {
+    return crow::response(200, "OK");
 }

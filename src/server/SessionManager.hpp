@@ -5,43 +5,31 @@
 #include <unordered_map>
 #include <vector>
 #include <mutex>
-
+#include <atomic>
 
 namespace FindTheBug {
 
     class SessionManager {
     public:
         explicit SessionManager() = default;
-		~SessionManager() = default;
+        ~SessionManager() = default;
 
-		//Lobby
-		std::string createLobby(const std::string& hostName, crow::websocket::connection* conn);
-		bool joinAsPlayer(const std::string& sessionId, const std::string& playerName, crow::websocket::connection* conn);
-		bool joinAsMaster(const std::string& sessionId, const std::string& masterName, crow::websocket::connection* conn);
-		void leaveLobby(crow::websocket::connection* conn);
+		void registerConnection(const std::string& sessionId, crow::websocket::connection* conn);
+		void unregisterConnection(crow::websocket::connection* conn);
+		void closeSession(const std::string& sessionId);
 
-		std::optional<LobbyInfo> getLobby(const std::string& sessionId) const;
-		bool lobbyExists(const std::string& sessionId) const;
-		crow::websocket::connection* getMasterConnection(const std::string& sessionId);
-		std::vector<crow::websocket::connection*> getPlayerConnections(const std::string& sessionId);
+		void broadcastToSession(const std::string& sessionId, const std::string& message);
 
-		bool updateLobbyPhase(const std::string& sessionId, GamePhase newPhase);
+		static void sendTo(crow::websocket::connection* conn, const std::string& message);
+		static void log(const std::string& message);
 
-		void migrateHostIfNeeded(const std::string& sessionId);
+	private:
+		std::mutex mutex_;
 
-		void cleanupInactiveLobbies(int maxInactiveMinutes = 2);
+		std::unordered_map<std::string, std::unordered_set<crow::websocket::connection*>> sessionConnections_;
+		std::unordered_map<crow::websocket::connection*, std::string> connectionToSession_;
 
-    private:
-		mutable std::mutex mutex_;
-		std::unordered_map<std::string, LobbyInfo> lobbies_;
 
-		std::string generateSessionId() const;
-
-		void broadcastToLobby(const std::string& sessionId,
-			const crow::json::wvalue& message,
-			bool excludeMaster = false);
-
-		void notifyLobbyUpdate(const std::string& sessionId);
     };
 
 }

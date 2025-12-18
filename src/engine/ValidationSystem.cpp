@@ -1,19 +1,23 @@
 #include "ValidationSystem.hpp"
+#include <format>
+#include <cctype>
+#include <algorithm>
+#include <string>
 
 using namespace FindTheBug;
 
-bool ValidationSystem::suggestMatch(const std::string& submitted, const std::string& expected) const {
-    auto normalize = [](std::string s) {
-        std::string result;
-        result.reserve(s.size());
-        for (unsigned char c : s) {
-            result += static_cast<char>(std::tolower(c));
-        }
-        return result;
-        };
+static std::string normalizeString(const std::string& s) {
+    std::string result;
+    result.reserve(s.size());
+    for (unsigned char c : s) {
+        result += static_cast<char>(std::tolower(c));
+    }
+    return result;
+}
 
-    std::string s1 = normalize(submitted);
-    std::string s2 = normalize(expected);
+bool ValidationSystem::suggestMatch(const std::string& submitted, const std::string& expected) const {
+    std::string s1 = normalizeString(submitted);
+    std::string s2 = normalizeString(expected);
 
     return s1.find(s2) != std::string::npos || s2.find(s1) != std::string::npos;
 }
@@ -25,28 +29,30 @@ ValidationResult ValidationSystem::prepareForMaster(
     ValidationResult result;
     result.isCorrect = false;
     result.score = 0;
+    result.generalMessage = "Aguardando validacao do Mestre";
 
     const auto& expected = bugCase.correctAnswers;
     const auto& questions = bugCase.solutionQuestions;
 
-    for (size_t i = 0; i < questions.size(); ++i) {
-        std::string submitted = (i < playerAnswers.size()) ? playerAnswers[i] : "[SEM RESPOSTA]";
-        std::string expectedText = (i < expected.size()) ? expected[i] : "[GABARITO NÃO DEFINIDO]";
+    size_t count = std::max(questions.size(), playerAnswers.size());
 
-        bool autoMatch = suggestMatch(submitted, expectedText);
+    for (size_t i = 0; i < count; ++i) {
+        std::string question = (i < questions.size()) ? questions[i] : "Pergunta Extra";
+        std::string submitted = (i < playerAnswers.size()) ? playerAnswers[i] : "[SEM RESPOSTA]";
+        std::string gabarito = (i < expected.size()) ? expected[i] : "[GABARITO INDEFINIDO]";
+
+        bool autoMatch = suggestMatch(submitted, gabarito);
 
         std::string feedback = std::format(
-            "Pergunta: {}\nResposta Equipe: {}\nGabarito: {}\nSugestão do Sistema: {}",
-            questions[i],
+            "Pergunta: {}\nResposta Equipe: {}\nGabarito: {}\nSugestao do Sistema: {}",
+            question,
             submitted,
-            expectedText,
-            autoMatch ? "CORRESPONDÊNCIA PROVÁVEL" : "REVISÃO MANUAL NECESSÁRIA"
+            gabarito,
+            (autoMatch ? "Parece Correto" : "Parece Incorreto")
         );
 
         result.feedbackPerQuestion.push_back(feedback);
     }
-
-    result.generalMessage = "Aguardando decisão do Mestre do Jogo...";
 
     return result;
 }

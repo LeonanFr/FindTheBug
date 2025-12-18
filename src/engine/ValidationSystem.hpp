@@ -1,21 +1,20 @@
 #pragma once
 
-#include "../shared/DTOS.hpp"
+#include <vector>
+#include <string>
 #include "Types.hpp"
+#include "../shared/DTOs.hpp"
 
 namespace FindTheBug {
-	
-	class ValidationSystem {
-	public:
-		explicit ValidationSystem() = default;
 
-		ValidationResult prepareForMaster(
-			const std::vector<std::string>& playerAnswers,
-			const BugCase& bugCase
-		) const;
+    class ValidationSystem {
+    public:
+        ValidationResult prepareForMaster(
+            const std::vector<std::string>& playerAnswers,
+            const BugCase& bugCase
+        ) const;
 
-	private:
-		bool suggestMatch(const std::string& submitted, const std::string& expected) const;
-	};
-
+    private:
+        bool suggestMatch(const std::string& submitted, const std::string& expected) const;
+    };
 }

@@ -1,45 +1,219 @@
 #include "MongoStore.hpp"
 
-#define NOMINMAX 
-
 #include <bsoncxx/json.hpp>
 #include <mongocxx/client.hpp>
 #include <mongocxx/instance.hpp>
+#include <mongocxx/pool.hpp>
 #include <mongocxx/uri.hpp>
 #include <bsoncxx/builder/stream/document.hpp>
 #include <bsoncxx/builder/stream/helpers.hpp>
 #include <bsoncxx/builder/stream/array.hpp>
 
 #include <iostream>
-#include <vector>
-#include <optional>
+#include <chrono>
 #include <algorithm>
+#include <print>
 
 using namespace FindTheBug;
+using namespace bsoncxx::builder::stream;
+
+static mongocxx::instance instance{};
 
 class MongoStore::Impl {
 public:
-    static mongocxx::instance instance;
-    mongocxx::client client;
-    mongocxx::database db;
+    std::shared_ptr<mongocxx::pool> pool;
+    std::string dbName;
 
-    Impl(const std::string& uri, const std::string& name)
-        : client{ mongocxx::uri{uri} }, db{ client[name] } {
+    Impl(const std::string& uriString, const std::string& name)
+        : dbName(name) {
+        mongocxx::uri uri{ uriString };
+        pool = std::make_shared<mongocxx::pool>(uri);
+    }
+
+    auto acquire() {
+        return pool->acquire();
     }
 };
 
-mongocxx::instance MongoStore::Impl::instance{};
-
 MongoStore::MongoStore(const std::string& connectionUri, const std::string& dbName)
-    : impl{ std::make_unique<Impl>(connectionUri, dbName) } {
+    : pImpl(std::make_unique<Impl>(connectionUri, dbName)) {
 }
 
 MongoStore::~MongoStore() = default;
 
+// Operações de Lobby
+
+bool MongoStore::createLobby(const std::string& sessionId, const PlayerInfo& host) {
+    try {
+        auto conn = pImpl->acquire();
+        auto db = (*conn)[pImpl->dbName];
+        auto collection = db["sessions"];
+
+        auto doc = document{}
+            << "sessionId" << sessionId
+            << "phase" << static_cast<int>(GamePhase::Lobby)
+            << "createdAt" << bsoncxx::types::b_date(std::chrono::system_clock::now())
+            << "lastActivity" << bsoncxx::types::b_date(std::chrono::system_clock::now())
+            << "players" << open_array
+            << open_document
+            << "name" << host.name
+            << "role" << static_cast<int>(host.role)
+            << "joinedAt" << bsoncxx::types::b_date(host.joinedAt)
+            << close_document
+            << close_array
+            << finalize;
+
+        collection.insert_one(doc.view());
+        return true;
+    }
+    catch (const std::exception& e) {
+        std::print("[MONGO] Error in createLobby: {}\n", e.what());
+        return false;
+    }
+}
+
+bool MongoStore::addPlayerToLobby(const std::string& sessionId, const PlayerInfo& player) {
+    try {
+        auto conn = pImpl->acquire();
+        auto db = (*conn)[pImpl->dbName];
+        auto collection = db["sessions"];
+
+        auto update = document{}
+            << "$push" << open_document
+            << "players" << open_document
+            << "name" << player.name
+            << "role" << static_cast<int>(player.role)
+            << "joinedAt" << bsoncxx::types::b_date(player.joinedAt)
+            << close_document
+            << close_document
+            << "$set" << open_document
+            << "lastActivity" << bsoncxx::types::b_date(std::chrono::system_clock::now())
+            << close_document
+            << finalize;
+
+        auto result = collection.update_one(
+            document{} << "sessionId" << sessionId << finalize,
+            update.view()
+        );
+
+        return result && result->modified_count() > 0;
+    }
+    catch (const std::exception& e) {
+        std::print("[MONGO] Error in addPlayerToLobby: {}\n", e.what());
+        return false;
+    }
+}
+
+bool MongoStore::removePlayerFromLobby(const std::string& sessionId, const std::string& playerName) {
+    try {
+        auto conn = pImpl->acquire();
+        auto db = (*conn)[pImpl->dbName];
+        auto collection = db["sessions"];
+
+        auto update = document{}
+            << "$pull" << open_document
+            << "players" << open_document
+            << "name" << playerName
+            << close_document
+            << close_document
+            << "$set" << open_document
+            << "lastActivity" << bsoncxx::types::b_date(std::chrono::system_clock::now())
+            << close_document
+            << finalize;
+
+        auto result = collection.update_one(
+            document{} << "sessionId" << sessionId << finalize,
+            update.view()
+        );
+
+        return result && result->modified_count() > 0;
+    }
+    catch (const std::exception& e) {
+        std::print("[MONGO] Error in removePlayerFromLobby: {}\n", e.what());
+        return false;
+    }
+}
+
+bool MongoStore::updatePhase(const std::string& sessionId, GamePhase newPhase) {
+    try {
+        auto conn = pImpl->acquire();
+        auto db = (*conn)[pImpl->dbName];
+        auto collection = db["sessions"];
+
+        auto result = collection.update_one(
+            document{} << "sessionId" << sessionId << finalize,
+            document{} << "$set" << open_document
+            << "phase" << static_cast<int>(newPhase)
+            << "lastActivity" << bsoncxx::types::b_date(std::chrono::system_clock::now())
+            << close_document << finalize
+        );
+        return result && result->modified_count() > 0;
+    }
+    catch (const std::exception& e) {
+        std::print("[MONGO] Error in updatePhase: {}\n", e.what());
+        return false;
+    }
+}
+
+std::optional<LobbyInfo> MongoStore::getLobby(const std::string& sessionId) const {
+    try {
+        auto conn = pImpl->acquire();
+        auto db = (*conn)[pImpl->dbName];
+        auto collection = db["sessions"];
+
+        auto result = collection.find_one(
+            document{} << "sessionId" << sessionId << finalize
+        );
+
+        if (!result) return std::nullopt;
+
+        auto view = result->view();
+        LobbyInfo lobby;
+
+        if (view["sessionId"])
+            lobby.sessionId = std::string(view["sessionId"].get_string().value);
+
+        if (view["phase"])
+            lobby.phase = static_cast<GamePhase>(view["phase"].get_int32().value);
+
+        if (view["players"] && view["players"].type() == bsoncxx::type::k_array) {
+            for (const auto& elem : view["players"].get_array().value) {
+                auto doc = elem.get_document().view();
+                PlayerInfo p;
+                if (doc["name"]) p.name = std::string(doc["name"].get_string().value);
+                if (doc["role"]) p.role = static_cast<PlayerRole>(doc["role"].get_int32().value);
+
+                lobby.players.push_back(p);
+            }
+        }
+
+        return lobby;
+    }
+    catch (const std::exception& e) {
+        std::print("[MONGO] Error in getLobby: {}\n", e.what());
+        return std::nullopt;
+    }
+}
+
+bool MongoStore::sessionExists(const std::string& sessionId) const {
+    try {
+        auto conn = pImpl->acquire();
+        auto db = (*conn)[pImpl->dbName];
+        auto collection = db["sessions"];
+        return collection.count_documents(document{} << "sessionId" << sessionId << finalize) > 0;
+    }
+    catch (...) { return false; }
+}
+
+// Operações de Jogo
+
 std::optional<BugCase> MongoStore::getCase(const std::string& caseId) const {
     try {
-        auto collection = impl->db["cases"];
-        auto result = collection.find_one(bsoncxx::builder::stream::document{} << "id" << caseId << bsoncxx::builder::stream::finalize);
+        auto conn = pImpl->acquire();
+        auto db = (*conn)[pImpl->dbName];
+        auto collection = db["cases"];
+
+        auto result = collection.find_one(document{} << "id" << caseId << finalize);
 
         if (!result) return std::nullopt;
 
@@ -79,16 +253,18 @@ std::optional<BugCase> MongoStore::getCase(const std::string& caseId) const {
         return bc;
     }
     catch (const std::exception& e) {
-        std::cerr << "Erro getCase: " << e.what() << std::endl;
+        std::print("[MONGO] Error in getCase: {}\n", e.what());
         return std::nullopt;
     }
 }
-std::optional<GameState> MongoStore::getSession(const std::string& sessionId) const {
-    try {
-        auto collection = impl->db["sessions"];
-        auto result = collection.find_one(bsoncxx::builder::stream::document{}
-        << "sessionId" << sessionId << bsoncxx::builder::stream::finalize);
 
+std::optional<GameState> MongoStore::getGameState(const std::string& sessionId) const {
+    try {
+        auto conn = pImpl->acquire();
+        auto db = (*conn)[pImpl->dbName];
+        auto collection = db["sessions"];
+
+        auto result = collection.find_one(document{} << "sessionId" << sessionId << finalize);
         if (!result) return std::nullopt;
 
         auto view = result->view();
@@ -100,16 +276,25 @@ std::optional<GameState> MongoStore::getSession(const std::string& sessionId) co
         if (view["remainingPoints"]) gs.remainingPoints = view["remainingPoints"].get_int32().value;
         if (view["isCompleted"]) gs.isCompleted = view["isCompleted"].get_bool().value;
         if (view["isSuddenDeath"]) gs.isSuddenDeath = view["isSuddenDeath"].get_bool().value;
+        if (view["hostPlayerId"]) gs.hostPlayerId = std::string(view["hostPlayerId"].get_string().value);
+        if (view["masterPlayerId"]) gs.masterPlayerId = std::string(view["masterPlayerId"].get_string().value);
 
-        // playerIds
         if (view["playerIds"] && view["playerIds"].type() == bsoncxx::type::k_array) {
             for (const auto& elem : view["playerIds"].get_array().value) {
                 gs.playerIds.push_back(std::string(elem.get_string().value));
             }
         }
 
-        if (view["hostPlayerId"]) {
-            gs.hostPlayerId = std::string(view["hostPlayerId"].get_string().value);
+        if (view["investigatedTargets"] && view["investigatedTargets"].type() == bsoncxx::type::k_array) {
+            for (const auto& elem : view["investigatedTargets"].get_array().value) {
+                gs.investigatedTargets.insert(std::string(elem.get_string().value));
+            }
+        }
+
+        if (view["breakpointedTargets"] && view["breakpointedTargets"].type() == bsoncxx::type::k_array) {
+            for (const auto& elem : view["breakpointedTargets"].get_array().value) {
+                gs.breakpointedTargets.insert(std::string(elem.get_string().value));
+            }
         }
 
         if (view["discoveredClues"] && view["discoveredClues"].type() == bsoncxx::type::k_array) {
@@ -126,85 +311,19 @@ std::optional<GameState> MongoStore::getSession(const std::string& sessionId) co
             }
         }
 
-        if (view["investigatedTargets"] && view["investigatedTargets"].type() == bsoncxx::type::k_array) {
-            for (const auto& elem : view["investigatedTargets"].get_array().value) {
-                gs.investigatedTargets.insert(std::string(elem.get_string().value));
-            }
-        }
-
-        if (view["breakpointedTargets"] && view["breakpointedTargets"].type() == bsoncxx::type::k_array) {
-            for (const auto& elem : view["breakpointedTargets"].get_array().value) {
-                gs.breakpointedTargets.insert(std::string(elem.get_string().value));
-            }
-        }
-
         return gs;
     }
     catch (const std::exception& e) {
-        std::cerr << "Erro getSession: " << e.what() << std::endl;
+        std::print("[MONGO] Error in getGameState: {}\n", e.what());
         return std::nullopt;
     }
 }
 
-bool MongoStore::createSession(const GameState& state) {
+bool MongoStore::saveGameState(const GameState& state) {
     try {
-        auto collection = impl->db["sessions"];
-
-        using bsoncxx::builder::stream::document;
-        using bsoncxx::builder::stream::finalize;
-
-        bsoncxx::builder::stream::array inv_array;
-        for (const auto& t : state.investigatedTargets) inv_array << t;
-
-        bsoncxx::builder::stream::array bp_array;
-        for (const auto& t : state.breakpointedTargets) bp_array << t;
-
-        bsoncxx::builder::stream::array player_ids_array;
-        for (const auto& playerId : state.playerIds) player_ids_array << playerId;
-
-        bsoncxx::builder::stream::array clues_array;
-        for (const auto& clue : state.discoveredClues) {
-            clues_array << bsoncxx::builder::stream::open_document
-                << "id" << clue.id
-                << "targetId" << clue.targetId
-                << "targetType" << static_cast<int>(clue.targetType)
-                << "type" << static_cast<int>(clue.type)
-                << "content" << clue.content
-                << "cost" << clue.cost
-                << bsoncxx::builder::stream::close_document;
-        }
-
-        auto doc = document{}
-            << "sessionId" << state.sessionId
-            << "currentCaseId" << state.currentCaseId
-            << "currentDay" << state.currentDay
-            << "remainingPoints" << state.remainingPoints
-            << "isCompleted" << state.isCompleted
-            << "isSuddenDeath" << state.isSuddenDeath
-            << "playerIds" << player_ids_array
-            << "hostPlayerId" << state.hostPlayerId
-            << "discoveredClues" << clues_array
-            << "investigatedTargets" << inv_array
-            << "breakpointedTargets" << bp_array
-            << finalize;
-
-        auto result = collection.insert_one(doc.view());
-        return result ? true : false;
-    }
-    catch (const std::exception& e) {
-        std::cerr << "Erro createSession: " << e.what() << std::endl;
-        return false;
-    }
-}
-
-bool MongoStore::updateSession(const GameState& state) {
-    try {
-        auto collection = impl->db["sessions"];
-
-        using bsoncxx::builder::stream::document;
-        using bsoncxx::builder::stream::open_document;
-        using bsoncxx::builder::stream::close_document;
-        using bsoncxx::builder::stream::finalize;
+        auto conn = pImpl->acquire();
+        auto db = (*conn)[pImpl->dbName];
+        auto collection = db["sessions"];
 
         bsoncxx::builder::stream::array inv_array;
         for (const auto& t : state.investigatedTargets) inv_array << t;
@@ -228,15 +347,18 @@ bool MongoStore::updateSession(const GameState& state) {
         }
 
         auto update_doc = document{} << "$set" << open_document
+            << "currentCaseId" << state.currentCaseId
             << "currentDay" << state.currentDay
             << "remainingPoints" << state.remainingPoints
             << "isCompleted" << state.isCompleted
             << "isSuddenDeath" << state.isSuddenDeath
             << "playerIds" << player_ids_array
             << "hostPlayerId" << state.hostPlayerId
+            << "masterPlayerId" << state.masterPlayerId
             << "discoveredClues" << clues_array
             << "investigatedTargets" << inv_array
             << "breakpointedTargets" << bp_array
+            << "lastActivity" << bsoncxx::types::b_date(std::chrono::system_clock::now())
             << close_document << finalize;
 
         auto result = collection.update_one(
@@ -247,7 +369,46 @@ bool MongoStore::updateSession(const GameState& state) {
         return result && result->modified_count() > 0;
     }
     catch (const std::exception& e) {
-        std::cerr << "Erro updateSession: " << e.what() << std::endl;
+        std::print("[MONGO] Error in saveGameState: {}\n", e.what());
+        return false;
+    }
+}
+
+bool MongoStore::deleteSession(const std::string& sessionId) {
+    try {
+        auto conn = pImpl->acquire();
+        auto db = (*conn)[pImpl->dbName];
+        auto collection = db["sessions"];
+
+        std::print("[MONGO DEBUG] Iniciando remocao da sessao: {}\n", sessionId);
+
+        auto count = collection.count_documents(document{} << "sessionId" << sessionId << finalize);
+        std::print("[MONGO DEBUG] Documentos encontrados antes do delete: {}\n", count);
+
+        if (count == 0) {
+            std::print("[MONGO AVISO] A sessao {} nao foi encontrada no banco para deletar.\n", sessionId);
+            return false;
+        }
+
+        auto result = collection.delete_one(
+            document{} << "sessionId" << sessionId << finalize
+        );
+
+        if (result) {
+            std::print("[MONGO DEBUG] Operacao delete concluida. Deletados: {}\n", result->deleted_count());
+            return result->deleted_count() > 0;
+        }
+        else {
+            std::print("[MONGO ERRO] O driver retornou um resultado vazio (std::nullopt).\n");
+            return false;
+        }
+    }
+    catch (const std::exception& e) {
+        std::print("[MONGO CRITICO] Excecao ao deletar sessao: {}\n", e.what());
+        return false;
+    }
+    catch (...) {
+        std::print("[MONGO CRITICO] Erro desconhecido ao deletar sessao.\n");
         return false;
     }
 }

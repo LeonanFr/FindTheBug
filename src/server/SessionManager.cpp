@@ -1,311 +1,107 @@
 #include "SessionManager.hpp"
-
-#include "crow.h"
+#include <iostream>
+#include <vector>
+#include <print>
 
 using namespace FindTheBug;
 
-std::string SessionManager::generateSessionId() const {
-	static const char alphanum[] =
-		"0123456789"
-		"ABCDEFGHIJKLMNOPQRSTUVWXYZ";
-	
-	static std::random_device rd;
-	static std::mt19937 gen(rd());
-	static std::uniform_int_distribution<> dis(0, sizeof(alphanum) - 2);
+static std::mutex global_send_mutex;
+static std::mutex global_log_mutex;
 
-	const int len = 6;
+void SessionManager::registerConnection(const std::string& sessionId, crow::websocket::connection* conn) {
+    if (!conn) return;
 
-	std::string id;
-	for (int i = 0; i < len; ++i) {
-		id += alphanum[dis(gen)];
-	}
+    std::lock_guard<std::mutex> lock(mutex_);
 
-	if (lobbyExists(id)) {
-		return generateSessionId();
-	}
+    sessionConnections_[sessionId].insert(conn);
 
-	return id;
+    connectionToSession_[conn] = sessionId;
+
+    log("[SessionManager] Conexao registrada na sessao: " + sessionId);
 }
 
-std::string SessionManager::createLobby(const std::string& hostName,
-	crow::websocket::connection* conn) {
+void SessionManager::unregisterConnection(crow::websocket::connection* conn) {
+    std::lock_guard<std::mutex> lock(mutex_);
 
-	std::lock_guard<std::mutex> lock(mutex_);
-	
-	std::string sessionId = generateSessionId();
-	
-	LobbyInfo lobby;
-	lobby.sessionId = sessionId;
-	lobby.createdAt = std::chrono::system_clock::now();
-	lobby.lastActivity = lobby.createdAt;
-	lobby.phase = GamePhase::Lobby;
+    if (connectionToSession_.contains(conn)) {
+        std::string sessionId = connectionToSession_[conn];
 
-	PlayerInfo host;
-	host.id = "host_" + sessionId;
-	host.name = hostName;
-	host.role = PlayerRole::Host;
-	host.connection = conn;
-	host.joinedAt = std::chrono::system_clock::now();
+        sessionConnections_[sessionId].erase(conn);
 
-	lobby.players.push_back(host);
-	lobbies_[sessionId] = lobby;
+        if (sessionConnections_[sessionId].empty()) {
+            sessionConnections_.erase(sessionId);
+        }
 
-	return sessionId;
+        connectionToSession_.erase(conn);
+
+        log("[SessionManager] Conexao removida da sessao: " + sessionId);
+    }
 }
 
-bool SessionManager::joinAsPlayer(const std::string& sessionId,
-		const std::string& playerName,
-		crow::websocket::connection* conn)
+void FindTheBug::SessionManager::closeSession(const std::string& sessionId)
 {
-	std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<crow::websocket::connection*> targets;
 
-	auto it = lobbies_.find(sessionId);
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (sessionConnections_.contains(sessionId)) {
+            for (auto* conn : sessionConnections_[sessionId]) {
+                targets.push_back(conn);
+            }
+            sessionConnections_.erase(sessionId);
+        }
+    }
 
-	if (it == lobbies_.end()) {
-		return false;
-	}
-
-	LobbyInfo& lobby = it->second;
-
-	if (lobby.playerCount() >= 5) {
-		return false;
-	}
-
-	auto nameExists = [&](const std::string& name) {
-		return std::any_of(lobby.players.begin(), lobby.players.end(),
-			[&](const PlayerInfo& p) { return p.name == name; });
-		};
-
-	if (nameExists(playerName)) {
-		return false;
-	}
-
-	PlayerInfo player;
-	player.id = "player_" + std::to_string(std::chrono::system_clock::now().time_since_epoch().count());
-	player.name = playerName;
-	player.role = PlayerRole::Player;
-	player.connection = conn;
-	player.joinedAt = std::chrono::system_clock::now();
-
-	lobby.players.push_back(player);
-	lobby.lastActivity = std::chrono::system_clock::now();
-
-	notifyLobbyUpdate(sessionId);
-	return true;
+    for (auto* conn : targets) {
+        if (conn) {
+            std::lock_guard<std::mutex> lock(mutex_);
+            connectionToSession_.erase(conn);
+        }
+        try { conn->close("Partida Encerrada"); } catch(...){}
+    }
+    log("[SessionManager] Sessao " + sessionId + " encerrada e limpa da RAM.");
 }
 
-bool SessionManager::joinAsMaster(const std::string& sessionId,
-	const std::string& masterName,
-	crow::websocket::connection* conn) {
-	std::lock_guard lock(mutex_);
+void SessionManager::broadcastToSession(const std::string& sessionId, const std::string& message) {
+    
+    std::vector<crow::websocket::connection*> targets;
 
-	auto it = lobbies_.find(sessionId);
-	if (it == lobbies_.end()) return false;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (sessionConnections_.contains(sessionId)) {
+            for (auto* conn : sessionConnections_[sessionId]) {
+                targets.push_back(conn);
+            }
+        }
+    }
 
-	LobbyInfo& lobby = it->second;
-
-	if (lobby.hasMaster()) return false;
-
-	PlayerInfo master;
-	master.id = "master_" + masterName;
-	master.name = masterName;
-	master.role = PlayerRole::Master;
-	master.connection = conn;
-	master.joinedAt = std::chrono::system_clock::now();
-
-	lobby.players.push_back(master);
-	lobby.lastActivity = std::chrono::system_clock::now();
-
-	notifyLobbyUpdate(sessionId);
-	return true;
+    if (!targets.empty()) {
+        log("[SessionManager] Broadcast para " + sessionId + " (" + std::to_string(targets.size()) + " alvos)");
+        for (auto* conn : targets) {
+            sendTo(conn, message);
+        }
+    }
 }
 
-void SessionManager::leaveLobby(crow::websocket::connection* conn) {
-	
-	std::lock_guard lock(mutex_);
+void SessionManager::sendTo(crow::websocket::connection* conn, const std::string& msg) {
+    if (!conn) return;
 
-	for (auto& [sessionId, lobby] : lobbies_) {
-		auto player = lobby.findPlayerByConnection(conn);
-		if (player) {
-			PlayerRole role = player->role;
-
-			lobby.players.erase(
-				std::remove_if(lobby.players.begin(), lobby.players.end(),
-					[conn](const PlayerInfo& p) { return p.connection == conn; }),
-				lobby.players.end()
-			);
-
-			lobby.lastActivity = std::chrono::system_clock::now();
-
-			if (role == PlayerRole::Host && lobby.playerCount() > 0) {
-				auto* firstPlayer = lobby.getRegularPlayers().empty() ? nullptr : lobby.getRegularPlayers()[0];
-				if (firstPlayer) firstPlayer->role = PlayerRole::Host;
-			}
-
-			notifyLobbyUpdate(sessionId);
-
-			if (lobby.players.empty()) lobbies_.erase(sessionId);
-
-			break;
-		}
-	}
+    try {
+        std::lock_guard<std::mutex> lock(global_send_mutex);
+        conn->send_text(msg);
+    }
+    catch (const std::exception& e) {
+        log("[ERRO] Falha no envio: " + std::string(e.what()));
+    }
+    catch (...) {
+        log("[ERRO] Falha desconhecida no envio");
+    }
 }
 
-std::optional<LobbyInfo> SessionManager::getLobby(const std::string& sessionId) const {
-	
-	std::lock_guard lock(mutex_);
-
-	auto it = lobbies_.find(sessionId);
-	if (it != lobbies_.end()) return it->second;
-
-	return std::nullopt;
-}
-
-bool SessionManager::lobbyExists(const std::string& sessionId) const {
-	std::lock_guard lock(mutex_);
-	return lobbies_.find(sessionId) != lobbies_.end();
-}
-
-crow::websocket::connection* SessionManager::getMasterConnection(const std::string& sessionId) {
-	std::lock_guard lock(mutex_);
-
-	auto it = lobbies_.find(sessionId);
-	if(it!=lobbies_.end()){
-		auto* master = it->second.getMaster();
-		return master ? master->connection : nullptr;
-	}
-	return nullptr;
-}
-
-std::vector<crow::websocket::connection*> SessionManager::getPlayerConnections(const std::string& sessionId) {
-
-	std::lock_guard lock(mutex_);
-
-	std::vector<crow::websocket::connection*> connections;
-	
-	auto it = lobbies_.find(sessionId);
-	
-	if (it != lobbies_.end())
-	{
-		const LobbyInfo& lobby = it->second;
-		for (const auto& player : lobby.players) {
-			if (player.role == PlayerRole::Player || player.role == PlayerRole::Host) {
-				connections.push_back(player.connection);
-			}
-		}
-	}
-
-	return connections;
-}
-
-bool SessionManager::updateLobbyPhase(const std::string& sessionId, GamePhase newPhase) {
-
-	std::lock_guard lock(mutex_);
-
-	auto it = lobbies_.find(sessionId);
-	if (it == lobbies_.end()) return false;
-
-	it->second.phase = newPhase;
-	it->second.lastActivity = std::chrono::system_clock::now();
-
-	notifyLobbyUpdate(sessionId);
-	return true;
-}
-
-void SessionManager::notifyLobbyUpdate(const std::string& sessionId) {
-	auto lobby = getLobby(sessionId);
-	if (!lobby) return;
-
-	crow::json::wvalue update;
-	update["type"] = "LOBBY_UPDATE";
-	update["sessionId"] = sessionId;
-	update["canStart"] = lobby->canStartGame();
-
-	crow::json::wvalue playersJson = crow::json::wvalue::list();
-	int index = 0;
-
-	for (const auto& player : lobby->players) {
-		if (player.role == PlayerRole::Master) continue;
-
-		crow::json::wvalue playerJson;
-		playerJson["name"] = player.name;
-		playerJson["role"] = static_cast<int>(player.role);
-		playersJson[index++] = std::move(playerJson);
-	}
-	update["players"] = std::move(playersJson);
-
-	broadcastToLobby(sessionId, update, false);
-}
-
-void SessionManager::broadcastToLobby(const std::string& sessionId,
-	const crow::json::wvalue& message,
-	bool excludeMaster) {
-	auto it = lobbies_.find(sessionId);
-	if (it == lobbies_.end()) return;
-
-	const LobbyInfo& lobby = it->second;
-	std::string messageStr = message.dump();
-
-	for (const auto& player : lobby.players) {
-		if (excludeMaster && player.role == PlayerRole::Master) continue;
-
-		if (player.connection) player.connection->send_text(messageStr);
-	}
-
-}
-
-void SessionManager::migrateHostIfNeeded(const std::string& sessionId) {
-	std::lock_guard lock(mutex_);
-
-	auto it = lobbies_.find(sessionId);
-	if (it == lobbies_.end()) return;
-
-	LobbyInfo& lobby = it->second;
-
-	bool hasHost = std::any_of(lobby.players.begin(), lobby.players.end(),
-		[](const PlayerInfo& p) { return p.role == PlayerRole::Host; });
-
-	if (!hasHost && !lobby.players.empty()) {
-
-		auto it = std::find_if(lobby.players.begin(), lobby.players.end(),
-			[](const PlayerInfo& p) { return p.role == PlayerRole::Player; });
-
-		if (it != lobby.players.end()) {
-			it->role = PlayerRole::Host;
-
-			crow::json::wvalue notification;
-			notification["type"] = "HOST_MIGRATED";
-			notification["newHost"] = it->name;
-
-			broadcastToLobby(sessionId, notification, false);
-
-			notifyLobbyUpdate(sessionId);
-		}
-	}
-}
-
-void SessionManager::cleanupInactiveLobbies(int maxInactiveMinutes) {
-	std::lock_guard lock(mutex_);
-
-	auto now = std::chrono::system_clock::now();
-	auto threshold = now - std::chrono::minutes(maxInactiveMinutes);
-	
-	std::vector<std::string> toRemove;
-
-	for (const auto& [sessionId, lobby] : lobbies_) {
-		if(lobby.lastActivity < threshold) {
-			toRemove.push_back(sessionId);
-		}
-	}
-
-	for (const auto& sessionId : toRemove) {
-		crow::json::wvalue notification;
-		notification["type"] = "LOBBY_EXPIRED";
-		notification["sessionId"] = sessionId;
-		notification["reason"] = "Lobby inativo por muito tempo.";
-
-		broadcastToLobby(sessionId, notification, false);
-
-		lobbies_.erase(sessionId);
-	}
+void SessionManager::log(const std::string& msg) {
+    try {
+        std::lock_guard<std::mutex> lock(global_log_mutex);
+        std::print("{}\n", msg);
+    }
+    catch (...) {}
 }

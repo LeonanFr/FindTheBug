@@ -60,6 +60,7 @@ namespace FindTheBug {
 
 		std::vector<std::string> playerIds;
 		std::string hostPlayerId;
+		std::string masterPlayerId;
 	};
 
 	struct PlayerInfo {
@@ -121,10 +122,25 @@ namespace FindTheBug {
 			return it != players.end() ? &(*it) : nullptr;
 		}
 
+		const PlayerInfo* getHost() const {
+			auto it = std::find_if(players.begin(), players.end(),
+				[](const PlayerInfo& p) { return p.role == PlayerRole::Host; });
+			return it != players.end() ? &(*it) : nullptr;
+		}
+
 		PlayerInfo* getMaster() {
 			auto it = std::find_if(players.begin(), players.end(),
 				[](const PlayerInfo& p) { return p.role == PlayerRole::Master; });
 			return it != players.end() ? &(*it) : nullptr;
+		}
+
+		const PlayerInfo* getMaster() const {
+			for (const auto& player : players) {
+				if (player.role == PlayerRole::Master) {
+					return &player;
+				}
+			}
+			return nullptr;
 		}
 
 		std::vector<PlayerInfo*> getPlayers() {

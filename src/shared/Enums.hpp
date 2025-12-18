@@ -2,6 +2,8 @@
 
 namespace FindTheBug {
 
+	enum class GameResult { Running, Victory, Defeat };
+
 	enum class ActionType {
 		ReadDocumentation,
 		InsertLog,

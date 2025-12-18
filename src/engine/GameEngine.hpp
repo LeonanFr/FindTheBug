@@ -1,41 +1,45 @@
 #pragma once
 
-#include "../shared/DTOS.hpp"
-#include "Types.hpp"
-#include "../storage/MongoStore.hpp"
 #include <memory>
 #include <string>
+#include <vector>
+#include "../storage/MongoStore.hpp"
+#include "Types.hpp"
+#include "../shared/DTOs.hpp"
 
 namespace FindTheBug {
-	
-	class GameEngine {
-	public:
-		explicit GameEngine(std::shared_ptr<MongoStore> storage);
-		~GameEngine();
 
-		bool initializeGameFromLobby(
-			const std::string& sessionId,
-			const std::string& caseId,
-			const std::vector<std::string>& playerNames,
-			const std::string& hostPlayerId
-			);
+    class GameEngine {
+    public:
+        explicit GameEngine(std::shared_ptr<MongoStore> storage);
+        ~GameEngine();
 
-		ProcessResult processAction(
-			const std::string& playerId,
-			ActionType actionType,
-			const std::string& targetId,
-			const std::string& sessionId
-		);
+        bool initializeGameFromLobby(
+            const std::string& sessionId,
+            const std::string& caseId,
+            const std::vector<std::string>& playerNames,
+            const std::string& hostPlayerId,
+            const std::string& masterPlayerId
+        );
 
-		ValidationResult submitToMaster(
-			const std::string& sessionId,
-			const std::vector<std::string>& answers
-		);
+        ProcessResult processAction(
+            const std::string& playerId,
+            ActionType actionType,
+            const std::string& targetId,
+            const std::string& sessionId
+        );
 
-		void finalizeSession(const std::string& sessionId, bool victory);
+        ValidationResult submitToMaster(
+            const std::string& sessionId,
+            const std::vector<std::string>& answers
+        );
 
-	private:
-		class Impl;
-		std::unique_ptr<Impl> impl;
-	};
+        GameResult finalizeSession(const std::string& sessionId, bool approvedByMaster);
+
+        std::shared_ptr<MongoStore> getStorage() const;
+
+    private:
+        class Impl;
+        std::unique_ptr<Impl> pImpl;
+    };
 }

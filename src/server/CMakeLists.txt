@@ -11,5 +11,6 @@ target_sources(findthebug-server
 target_link_libraries(findthebug-server 
     PRIVATE 
         findthebug-engine
+        findthebug-infra
         Crow::Crow
 )
