@@ -17,13 +17,34 @@ namespace FindTheBug {
     private:
 
         crow::response handleAction(const crow::request& req);
+
         void handleWebSocketOpen(crow::websocket::connection& conn);
+
         void handleWebSocketClose(crow::websocket::connection& conn, const std::string& reason);
+
         void handleWebSocketMessage(crow::websocket::connection& conn,
             const std::string& data, bool is_binary);
 
         std::shared_ptr<GameEngine> engine;
         std::shared_ptr<SessionManager> sessionManager;
+
+		void handleCreateLobby(crow::websocket::connection& conn,
+            const crow::json::rvalue& msg);
+		void handleJoinAsPlayer(crow::websocket::connection& conn,
+			const crow::json::rvalue& msg);
+        void handleJoinAsMaster(crow::websocket::connection& conn,
+			const crow::json::rvalue& msg);
+		void handleLeaveLobby(crow::websocket::connection& conn,
+            const crow::json::rvalue& msg);
+        void handleStartGame(crow::websocket::connection& conn,
+			const crow::json::rvalue& msg);
+		void handleGetLobbyInfo(crow::websocket::connection& conn,
+			const crow::json::rvalue& msg);
+
+        void sendJsonResponse(crow::websocket::connection& conn,
+            const std::string& type,
+			const crow::json::wvalue& data = {});
+
     };
 
 }

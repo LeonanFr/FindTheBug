@@ -22,6 +22,29 @@ namespace FindTheBug {
 
     GameEngine::~GameEngine() = default;
 
+
+    bool GameEngine::initializeGameFromLobby(
+        const std::string& sessionId,
+        const std::string& caseId,
+        const std::vector<std::string>& playerNames,
+        const std::string& hostPlayerId
+    ) {
+		auto bugCase = impl->storage->getCase(caseId);
+        if (!bugCase) return false;
+
+		GameState initialState;
+		initialState.sessionId = sessionId;
+		initialState.currentCaseId = caseId;
+		initialState.currentDay = 1;
+		initialState.remainingPoints = 12;
+		initialState.isCompleted = false;
+		initialState.isSuddenDeath = false;
+		initialState.playerIds = playerNames;
+		initialState.hostPlayerId = hostPlayerId;
+
+		return impl->storage->createSession(initialState);
+    }
+
     ProcessResult GameEngine::processAction(
         const std::string& playerId,
         ActionType actionType,
@@ -33,9 +56,21 @@ namespace FindTheBug {
             return { .success = false, .message = "Erro: Sessão não encontrada." };
         }
 
+		if (std::find(state->playerIds.begin(), state->playerIds.end(), playerId) == state->playerIds.end()) {
+            return { .success = false,
+                .newState = *state,
+                .message = "Erro: Jogador não faz parte da sessão."
+            };
+        }
+
         auto bugCase = impl->storage->getCase(state->currentCaseId);
         if (!bugCase) {
             return { .success = false, .newState = *state, .message = "Erro: Caso não encontrado." };
+        }
+
+        if (state->isSuddenDeath && actionType != ActionType::SubmitSolution) {
+            return { .success = false, .newState = *state,
+                     .message = "Modo morte súbita! Apenas submissão de solução é permitida." };
         }
 
         auto actionResult = impl->actionSystem.execute(
@@ -69,7 +104,16 @@ namespace FindTheBug {
             .timestamp = std::chrono::system_clock::now()
             });
 
-        // 6. Persistir
+        if (state->remainingPoints == 0) {
+            if (state->currentDay == 5) {
+				state->isSuddenDeath = true;
+            }
+            else {
+                state->currentDay++;
+				state->remainingPoints = 12;
+            }
+        }
+
         impl->storage->updateSession(*state);
 
         return { .success = true, .newState = *state, .message = actionResult.message };
@@ -90,14 +134,24 @@ namespace FindTheBug {
 
     void GameEngine::finalizeSession(const std::string& sessionId, bool victory) {
         auto state = impl->storage->getSession(sessionId);
-        if (!state) return; // Proteção contra crash
+        if (!state) return;
 
         if (victory) {
             state->isCompleted = true;
         }
         else {
-            state->currentDay = std::min(5, state->currentDay + 2);
-            state->remainingPoints = 12;
+            if(state->isSuddenDeath)
+				state->isCompleted = true;
+            else {
+                if (state->currentDay != 5) {
+                    state->currentDay = std::min(5, state->currentDay + 2);
+				    state->remainingPoints = 12;
+                }
+                else {
+                    state->remainingPoints = 0;
+					state->isSuddenDeath = true;
+                }
+            }
         }
 
         impl->storage->updateSession(*state);

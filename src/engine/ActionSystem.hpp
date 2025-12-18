@@ -28,7 +28,7 @@ namespace FindTheBug {
 		std::optional<Clue> findClueInCase(
 			const BugCase& bugCase,
 			const std::string& targetId,
-			ActionType type
+			ClueType type
 		) const;
 
 	};

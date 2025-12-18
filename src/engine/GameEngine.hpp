@@ -13,6 +13,13 @@ namespace FindTheBug {
 		explicit GameEngine(std::shared_ptr<MongoStore> storage);
 		~GameEngine();
 
+		bool initializeGameFromLobby(
+			const std::string& sessionId,
+			const std::string& caseId,
+			const std::vector<std::string>& playerNames,
+			const std::string& hostPlayerId
+			);
+
 		ProcessResult processAction(
 			const std::string& playerId,
 			ActionType actionType,

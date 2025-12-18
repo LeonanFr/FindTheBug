@@ -16,7 +16,7 @@ int ActionSystem::calculateCost(
 
 	case ActionType::RunUnitTests:
 		return 2;
-		
+
 	case ActionType::RunIntegrationTests:
 		return 3;
 
@@ -38,7 +38,7 @@ ActionResult ActionSystem::execute(
 	const std::string& targetId,
 	const BugCase& bugCase,
 	const GameState& currentState) const {
-	
+
 	ActionResult result{ .success = false, .pointsSpent = 0 };
 
 	int cost = calculateCost(actionType, targetId, currentState);
@@ -48,7 +48,32 @@ ActionResult ActionSystem::execute(
 		return result;
 	}
 
-	auto clue = findClueInCase(bugCase, targetId, actionType);
+	ClueType expectedClueType = ClueType::Documentation;
+	switch (actionType) {
+	case ActionType::ReadDocumentation:
+		expectedClueType = ClueType::Documentation;
+		break;
+	case ActionType::InsertLog:
+		expectedClueType = ClueType::Log;
+		break;
+	case ActionType::InvestigateFunction:
+		expectedClueType = ClueType::Code;
+		break;
+	case ActionType::SetBreakpoint:
+		expectedClueType = ClueType::Breakpoint;
+		break;
+	case ActionType::RunUnitTests:
+		expectedClueType = ClueType::UnitTestResult;
+		break;
+	case ActionType::RunIntegrationTests:
+		expectedClueType = ClueType::IntegrationTestResult;
+		break;
+	default:
+		result.message = "Tipo de ação não suportado.";
+		return result;
+	}
+
+	auto clue = findClueInCase(bugCase, targetId, expectedClueType);
 
 	if (!clue) {
 		result.message = "A análise não revelou comportamentos anômalos neste alvo.";
@@ -66,36 +91,11 @@ ActionResult ActionSystem::execute(
 std::optional<Clue> ActionSystem::findClueInCase(
 	const BugCase& bugCase,
 	const std::string& targetId,
-	ActionType type) const {
+	ClueType type) const {
 
-	auto it = std::ranges::find_if(bugCase.availableClues,
+	auto it = std::find_if(bugCase.availableClues.begin(), bugCase.availableClues.end(),
 		[&](const Clue& clue) {
-			bool idMatch = (clue.targetId == targetId);
-			bool typeMatches = false;
-
-			switch (type) {
-			case ActionType::ReadDocumentation:
-				typeMatches = (clue.type == ClueType::Documentation);
-				break;
-			case ActionType::InsertLog:
-				typeMatches = (clue.type == ClueType::Log);
-				break;
-			case ActionType::InvestigateFunction:
-				typeMatches = (clue.type == ClueType::Code);
-				break;
-			case ActionType::SetBreakpoint:
-				typeMatches = (clue.type == ClueType::Breakpoint);
-				break;
-			case ActionType::RunUnitTests:
-				typeMatches = (clue.type == ClueType::UnitTestResult);
-				break;
-			case ActionType::RunIntegrationTests:
-				typeMatches = (clue.type == ClueType::IntegrationTestResult);
-				break;
-			default:
-				typeMatches = false;
-			}
-			return typeMatches && idMatch;
+			return clue.targetId == targetId && clue.type == type;
 		});
 
 	if (it != bugCase.availableClues.end()) {
@@ -103,5 +103,4 @@ std::optional<Clue> ActionSystem::findClueInCase(
 	}
 
 	return std::nullopt;
-
 }

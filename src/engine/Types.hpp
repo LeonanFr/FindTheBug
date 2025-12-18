@@ -5,6 +5,7 @@
 #include <vector>
 
 namespace FindTheBug {
+
 	struct ActionResult {
 		bool success{ false };
 		int pointsSpent{ 0 };
