@@ -277,21 +277,20 @@ void HttpServer::processCreateLobby(crow::websocket::connection* conn, const std
     std::string sessionId = generateSessionId();
 
     taskQueue->enqueue([this, conn, sessionId, playerName]() {
-        PlayerInfo host;
-        host.name = playerName;
-        host.role = PlayerRole::Host;
-        host.joinedAt = std::chrono::system_clock::now();
+        PlayerInfo master;
+        master.name = playerName;
+        master.role = PlayerRole::Master;
+        master.joinedAt = std::chrono::system_clock::now();
 
-        if (storage->createLobby(sessionId, host)) {
+        if (storage->createLobby(sessionId, master)) {
             sessionManager->registerConnection(sessionId, conn, playerName);
 
             std::string resp = std::format(
                 "{{\"type\":\"LOBBY_CREATED\",\"sessionId\":\"{}\",\"playerName\":\"{}\",\"role\":{}}}",
-                sessionId, escapeJSON(playerName), (int)PlayerRole::Host
+                sessionId, escapeJSON(playerName), (int)PlayerRole::Master
             );
             SessionManager::sendTo(conn, resp);
-
-            SessionManager::log("[LOBBY] Criado: " + sessionId);
+            SessionManager::log("[LOBBY] Criado por Master: " + sessionId);
         }
         else {
             SessionManager::sendTo(conn, "{\"type\":\"ERROR\",\"message\":\"Falha ao criar lobby no DB\"}");
@@ -301,7 +300,6 @@ void HttpServer::processCreateLobby(crow::websocket::connection* conn, const std
 
 void HttpServer::processJoinAsPlayer(crow::websocket::connection* conn, const std::string& sessionId, const std::string& playerName) {
     taskQueue->enqueue([this, conn, sessionId, playerName]() {
-
         auto lobbyOpt = storage->getLobby(sessionId);
         if (!lobbyOpt) {
             SessionManager::sendTo(conn, "{\"type\":\"ERROR\",\"message\":\"Lobby nao encontrado\"}");
@@ -310,7 +308,6 @@ void HttpServer::processJoinAsPlayer(crow::websocket::connection* conn, const st
         const auto& lobby = *lobbyOpt;
 
         bool isRejoining = false;
-
         for (const auto& p : lobby.players) {
             if (p.name == playerName) {
                 isRejoining = true;
@@ -320,17 +317,12 @@ void HttpServer::processJoinAsPlayer(crow::websocket::connection* conn, const st
 
         if (isRejoining) {
             sessionManager->registerConnection(sessionId, conn, playerName);
-
             std::string resp = std::format(
                 "{{\"type\":\"JOINED_LOBBY\",\"sessionId\":\"{}\",\"playerName\":\"{}\",\"isRejoin\":true}}",
                 sessionId, escapeJSON(playerName)
             );
             SessionManager::sendTo(conn, resp);
-
-            if (lobby.phase == GamePhase::Investigation) {
-                broadcastGameState(sessionId);
-            }
-
+            if (lobby.phase == GamePhase::Investigation) broadcastGameState(sessionId);
             SessionManager::log("[RECONNECT] Jogador " + playerName + " voltou para sessao " + sessionId);
         }
         else {
@@ -341,7 +333,6 @@ void HttpServer::processJoinAsPlayer(crow::websocket::connection* conn, const st
 
             if (storage->addPlayerToLobby(sessionId, p)) {
                 sessionManager->registerConnection(sessionId, conn, playerName);
-
                 std::string resp = std::format(
                     "{{\"type\":\"JOINED_LOBBY\",\"sessionId\":\"{}\",\"playerName\":\"{}\",\"role\":{}}}",
                     sessionId, escapeJSON(playerName), (int)PlayerRole::Player
@@ -461,42 +452,26 @@ void HttpServer::processStartGame(crow::websocket::connection* conn, const std::
 
         const auto& lobby = *lobbyOpt;
 
-        bool isHost = false;
-        for (const auto& p : lobby.players) {
-            if (p.name == playerName && p.role == PlayerRole::Host) {
-                isHost = true;
-                break;
-            }
-        }
-
-        if (!isHost) {
-            SessionManager::log("[WARN] Tentativa de inicio por nao-host: " + playerName);
-            SessionManager::sendTo(conn, "{\"type\":\"ERROR\",\"message\":\"Permissao negada. Apenas o Host pode iniciar.\"}");
+        const PlayerInfo* master = lobby.getMaster();
+        if (!master || master->name != playerName) {
+            SessionManager::log("[WARN] Tentativa de inicio por nao-master: " + playerName);
+            SessionManager::sendTo(conn, "{\"type\":\"ERROR\",\"message\":\"Permissao negada. Apenas o Mestre pode iniciar.\"}");
             return;
         }
 
-        if (!lobby.canStartGame()) {
-            SessionManager::sendTo(conn, "{\"type\":\"ERROR\",\"message\":\"Nao e possivel iniciar. Aguardando Mestre ou Jogadores.\"}");
+        if (lobby.playerCount() == 0) {
+            SessionManager::sendTo(conn, "{\"type\":\"ERROR\",\"message\":\"Nao e possivel iniciar. Aguardando pelo menos um jogador.\"}");
             return;
         }
 
         std::vector<std::string> allParticipants;
-        std::string hostPlayerId;
-        std::string masterPlayerId;
+        std::string masterPlayerId = master->name;
 
         for (const auto& p : lobby.players) {
-            if (p.role == PlayerRole::Player || p.role == PlayerRole::Host || p.role == PlayerRole::Master) {
-                allParticipants.push_back(p.name);
-            }
-            if (p.role == PlayerRole::Host) {
-                hostPlayerId = p.name;
-            }
-            if (p.role == PlayerRole::Master) {
-                masterPlayerId = p.name;
-            }
+            allParticipants.push_back(p.name);
         }
 
-        if (!engine->initializeGameFromLobby(sessionId, caseId, allParticipants, hostPlayerId, masterPlayerId)) {
+        if (!engine->initializeGameFromLobby(sessionId, caseId, allParticipants, masterPlayerId, masterPlayerId)) {
             SessionManager::sendTo(conn, "{\"type\":\"ERROR\",\"message\":\"Erro ao criar sessao de jogo no banco.\"}");
             return;
         }
@@ -507,7 +482,7 @@ void HttpServer::processStartGame(crow::websocket::connection* conn, const std::
                 sessionId, escapeJSON(caseId)
             );
             sessionManager->broadcastToSession(sessionId, msg);
-            SessionManager::log("[GAME] Jogo iniciado pelo Host " + playerName + " na sessao " + sessionId);
+            SessionManager::log("[GAME] Jogo iniciado pelo Mestre " + playerName + " na sessao " + sessionId);
         }
         });
 }
@@ -639,21 +614,31 @@ void HttpServer::processLeaveLobby(crow::websocket::connection* conn) {
         std::string sessionId = info->first;
         std::string playerName = info->second;
 
-        if (storage->removePlayerFromLobby(sessionId, playerName)) {
-            auto lobbyOpt = storage->getLobby(sessionId);
-            if (lobbyOpt) {
-                const auto& lobby = *lobbyOpt;
-                const PlayerInfo* host = lobby.getHost();
-                if (host && host->name == playerName) {
-                    storage->deleteSession(sessionId);
-                    sessionManager->destroyLobby(sessionId, "Host saiu");
-                }
-                else {
-                    broadcastLobbyState(sessionId);
-                }
-            }
+        auto lobbyOpt = storage->getLobby(sessionId);
+        if (!lobbyOpt) {
+            sessionManager->unregisterConnection(conn);
+            return;
+        }
+        const auto& lobby = *lobbyOpt;
+        const PlayerInfo* master = lobby.getMaster();
+
+        if (master && master->name == playerName) {
+            storage->deleteSession(sessionId);
+            sessionManager->destroyLobby(sessionId, "Mestre saiu");
+            sessionManager->unregisterConnection(conn);
+            return;
         }
 
+        if (storage->removePlayerFromLobby(sessionId, playerName)) {
+            auto updatedLobby = storage->getLobby(sessionId);
+            if (!updatedLobby || updatedLobby->players.empty()) {
+                storage->deleteSession(sessionId);
+                sessionManager->destroyLobby(sessionId, "Lobby vazio");
+            }
+            else {
+                broadcastLobbyState(sessionId);
+            }
+        }
         sessionManager->unregisterConnection(conn);
         });
 }

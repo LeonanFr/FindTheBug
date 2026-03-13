@@ -140,16 +140,6 @@ namespace FindTheBug {
 				});
 		}
 
-		int playerCount() const {
-			int count = 0;
-			for (const auto& p : players) {
-				if (p.role == PlayerRole::Player || p.role == PlayerRole::Host) {
-					count++;
-				}
-			}
-			return count;
-		}
-
 		bool canStartGame() const {
 			return playerCount() >= 2 && 
 				hasMaster() &&
@@ -181,12 +171,18 @@ namespace FindTheBug {
 		}
 
 		const PlayerInfo* getMaster() const {
-			for (const auto& player : players) {
-				if (player.role == PlayerRole::Master) {
-					return &player;
-				}
+			for (const auto& p : players) {
+				if (p.role == PlayerRole::Master) return &p;
 			}
 			return nullptr;
+		}
+
+		int playerCount() const {
+			int count = 0;
+			for (const auto& p : players) {
+				if (p.role == PlayerRole::Player) count++;
+			}
+			return count;
 		}
 
 		std::vector<PlayerInfo*> getPlayers() {

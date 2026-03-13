@@ -32,8 +32,7 @@ namespace FindTheBug {
 
 	enum class PlayerRole {
 		Player,
-		Master,
-		Host
+		Master
 	};
 
 	enum class GamePhase {
