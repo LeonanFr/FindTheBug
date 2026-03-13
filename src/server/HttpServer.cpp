@@ -65,8 +65,9 @@ void HttpServer::runReaper() {
 
                 bool changed = false;
                 lobby.players.erase(std::remove_if(lobby.players.begin(), lobby.players.end(),
-                    [now](const PlayerInfo& p) {
-                        return p.connection == nullptr && (now - p.lastSeen) > std::chrono::seconds(15);
+                    [this, &sid, now](const PlayerInfo& p) {
+                        bool isOnline = sessionManager->isPlayerOnline(sid, p.name);
+                        return !isOnline && (now - p.lastSeen) > std::chrono::seconds(15);
                     }), lobby.players.end());
 
                 if (lobby.players.empty()) {
