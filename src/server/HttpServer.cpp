@@ -263,7 +263,7 @@ void HttpServer::handleWebSocketMessage(crow::websocket::connection& conn, const
             }
         }
         else if (type == "LEAVE_LOBBY") {
-            sessionManager->unregisterConnection(&conn);
+            processLeaveLobby(&conn);
         }
     }
     catch (const std::exception& e) {
@@ -604,7 +604,7 @@ void HttpServer::processGameAction(crow::websocket::connection* conn, const std:
 
         if (result.revealedClue) {
             std::string revealMsg = std::format(
-                "{{\"type\":\"CLUE_REVEALED\",\"clueId\":\"{}\",\"content\":\"{}\",\"duration\":30,\"investigator\":\"{}\"}}",
+                "{{\"type\":\"CLUE_REVEALED\",\"clueId\":\"{}\",\"content\":\"{}\",\"duration\":60,\"investigator\":\"{}\"}}",
                 result.revealedClue->id,
                 escapeJSON(result.revealedClue->content),
                 playerId
@@ -626,6 +626,35 @@ void HttpServer::processSaveNote(crow::websocket::connection* conn, const std::s
         else {
             SessionManager::sendTo(conn, "{\"type\":\"ERROR\",\"message\":\"Falha ao salvar nota (Pista nao encontrada?)\"}");
         }
+        });
+}
+
+void HttpServer::processLeaveLobby(crow::websocket::connection* conn) {
+    taskQueue->enqueue([this, conn]() {
+        auto info = sessionManager->getConnectionInfo(conn);
+        if (!info) {
+            sessionManager->unregisterConnection(conn);
+            return;
+        }
+        std::string sessionId = info->first;
+        std::string playerName = info->second;
+
+        if (storage->removePlayerFromLobby(sessionId, playerName)) {
+            auto lobbyOpt = storage->getLobby(sessionId);
+            if (lobbyOpt) {
+                const auto& lobby = *lobbyOpt;
+                const PlayerInfo* host = lobby.getHost();
+                if (host && host->name == playerName) {
+                    storage->deleteSession(sessionId);
+                    sessionManager->destroyLobby(sessionId, "Host saiu");
+                }
+                else {
+                    broadcastLobbyState(sessionId);
+                }
+            }
+        }
+
+        sessionManager->unregisterConnection(conn);
         });
 }
 

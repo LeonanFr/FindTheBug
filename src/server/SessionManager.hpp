@@ -6,6 +6,7 @@
 #include <vector>
 #include <mutex>
 #include <atomic>
+#include <optional>
 
 namespace FindTheBug {
 
@@ -14,23 +15,25 @@ namespace FindTheBug {
         explicit SessionManager() = default;
         ~SessionManager() = default;
 
-		void registerConnection(const std::string& sessionId, crow::websocket::connection* conn, const std::string& playerName);
-		void unregisterConnection(crow::websocket::connection* conn);
-		void closeSession(const std::string& sessionId);
+        void registerConnection(const std::string& sessionId, crow::websocket::connection* conn, const std::string& playerName);
+        void unregisterConnection(crow::websocket::connection* conn);
+        void closeSession(const std::string& sessionId);
+        void destroyLobby(const std::string& sessionId, const std::string& reason);
 
-		void broadcastToSession(const std::string& sessionId, const std::string& message);
+        void broadcastToSession(const std::string& sessionId, const std::string& message);
 
-		bool isPlayerOnline(const std::string& sessionId, const std::string& playerName);
-		static void sendTo(crow::websocket::connection* conn, const std::string& message);
-		static void log(const std::string& message);
+        bool isPlayerOnline(const std::string& sessionId, const std::string& playerName);
+        std::optional<std::pair<std::string, std::string>> getConnectionInfo(crow::websocket::connection* conn) const;
 
-	private:
-		std::mutex mutex_;
+        static void sendTo(crow::websocket::connection* conn, const std::string& message);
+        static void log(const std::string& message);
 
-		std::unordered_map<std::string, std::unordered_set<crow::websocket::connection*>> sessionConnections_;
-		std::unordered_map<crow::websocket::connection*, std::string> connectionToSession_;
+    private:
+        mutable std::mutex mutex_;
 
-		std::unordered_map<crow::websocket::connection*, std::string> connectionToPlayer_;
+        std::unordered_map<std::string, std::unordered_set<crow::websocket::connection*>> sessionConnections_;
+        std::unordered_map<crow::websocket::connection*, std::string> connectionToSession_;
+        std::unordered_map<crow::websocket::connection*, std::string> connectionToPlayer_;
     };
 
 }

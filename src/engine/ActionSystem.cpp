@@ -73,7 +73,7 @@ ActionResult ActionSystem::execute(
         return result;
     }
     
-    if (actionType == ActionType::SubmitSolution) {
+    if (actionType == ActionType::SkipTurn) {
         result.success = true;
         result.pointsSpent = 0;
         result.message = "O jogador decidiu passar a vez.";

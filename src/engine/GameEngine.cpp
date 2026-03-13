@@ -166,7 +166,7 @@ namespace FindTheBug {
             state.turnStartTime = std::chrono::system_clock::now();
 
             if (actionResult.unlockedClue) {
-                state.turnStartTime += std::chrono::seconds(30);
+                state.turnStartTime += std::chrono::seconds(60);
             }
         }
 

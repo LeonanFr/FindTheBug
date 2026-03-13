@@ -53,7 +53,7 @@ bool SessionManager::isPlayerOnline(const std::string& sessionId, const std::str
     return false;
 }
 
-void FindTheBug::SessionManager::closeSession(const std::string& sessionId)
+void SessionManager::closeSession(const std::string& sessionId)
 {
     std::vector<crow::websocket::connection*> targets;
 
@@ -71,14 +71,34 @@ void FindTheBug::SessionManager::closeSession(const std::string& sessionId)
         if (conn) {
             std::lock_guard<std::mutex> lock(mutex_);
             connectionToSession_.erase(conn);
+            connectionToPlayer_.erase(conn);
         }
-        try { conn->close("Partida Encerrada"); } catch(...){}
+        try { conn->close("Partida Encerrada"); }
+        catch (...) {}
     }
     log("[SessionManager] Sessao " + sessionId + " encerrada e limpa da RAM.");
 }
 
+void SessionManager::destroyLobby(const std::string& sessionId, const std::string& reason) {
+    std::vector<crow::websocket::connection*> targets;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (sessionConnections_.contains(sessionId)) {
+            for (auto* conn : sessionConnections_[sessionId]) {
+                targets.push_back(conn);
+            }
+        }
+    }
+
+    std::string msg = "{\"type\":\"LOBBY_DESTROYED\",\"reason\":\"" + reason + "\"}";
+    for (auto* conn : targets) {
+        sendTo(conn, msg);
+    }
+
+    closeSession(sessionId);
+}
+
 void SessionManager::broadcastToSession(const std::string& sessionId, const std::string& message) {
-    
     std::vector<crow::websocket::connection*> targets;
 
     {
@@ -119,4 +139,12 @@ void SessionManager::log(const std::string& msg) {
         std::print("{}\n", msg);
     }
     catch (...) {}
+}
+
+std::optional<std::pair<std::string, std::string>> SessionManager::getConnectionInfo(crow::websocket::connection* conn) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (connectionToSession_.contains(conn) && connectionToPlayer_.contains(conn)) {
+        return std::make_pair(connectionToSession_.at(conn), connectionToPlayer_.at(conn));
+    }
+    return std::nullopt;
 }

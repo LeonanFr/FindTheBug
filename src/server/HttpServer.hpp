@@ -39,6 +39,7 @@ namespace FindTheBug {
         void processValidateSolution(crow::websocket::connection* conn, const std::string& sessionId, bool approved);
         void processGameAction(crow::websocket::connection* conn, const std::string& sessionId, const std::string& playerId, ActionType actionType, const std::string& targetId);
         void processSaveNote(crow::websocket::connection* conn, const std::string& sessionId, const std::string& playerId, const std::string& clueId, const std::string& content);
+        void processLeaveLobby(crow::websocket::connection* conn);
 
         // Helpers
         void broadcastGameState(const std::string& sessionId);
