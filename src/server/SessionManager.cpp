@@ -10,14 +10,26 @@ static std::mutex global_log_mutex;
 
 void SessionManager::registerConnection(const std::string& sessionId, crow::websocket::connection* conn, const std::string& playerName) {
     if (!conn) return;
-
     std::lock_guard<std::mutex> lock(mutex_);
 
-    sessionConnections_[sessionId].insert(conn);
+    auto& setConns = sessionConnections_[sessionId];
+    for (auto it = setConns.begin(); it != setConns.end(); ) {
+        crow::websocket::connection* existingConn = *it;
+        if (connectionToPlayer_.contains(existingConn) && connectionToPlayer_[existingConn] == playerName) {
+            connectionToSession_.erase(existingConn);
+            connectionToPlayer_.erase(existingConn);
+            it = setConns.erase(it);
+        }
+        else {
+            ++it;
+        }
+    }
+
+    setConns.insert(conn);
     connectionToSession_[conn] = sessionId;
     connectionToPlayer_[conn] = playerName;
 
-    log("[SessionManager] Conexao registrada na sessao: " + sessionId);
+    log("[SessionManager] Jogador " + playerName + " vinculado ao socket em " + sessionId);
 }
 
 void SessionManager::unregisterConnection(crow::websocket::connection* conn) {
@@ -100,7 +112,6 @@ void SessionManager::destroyLobby(const std::string& sessionId, const std::strin
 
 void SessionManager::broadcastToSession(const std::string& sessionId, const std::string& message) {
     std::vector<crow::websocket::connection*> targets;
-
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (sessionConnections_.contains(sessionId)) {
@@ -109,12 +120,9 @@ void SessionManager::broadcastToSession(const std::string& sessionId, const std:
             }
         }
     }
-
-    if (!targets.empty()) {
-        log("[SessionManager] Broadcast para " + sessionId + " (" + std::to_string(targets.size()) + " alvos)");
-        for (auto* conn : targets) {
-            sendTo(conn, message);
-        }
+    log("[SessionManager] Broadcast para " + sessionId + " (" + std::to_string(targets.size()) + " alvos)");
+    for (auto* conn : targets) {
+        sendTo(conn, message);
     }
 }
 
