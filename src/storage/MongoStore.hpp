@@ -17,6 +17,7 @@ namespace FindTheBug {
 		bool updatePhase(const std::string& sessionId, GamePhase newPhase);
 		std::optional<LobbyInfo> getLobby(const std::string& sessionId) const;
 		bool sessionExists(const std::string& sessionId) const;
+		bool updateLobby(const LobbyInfo& lobby);
 
 		std::optional<BugCase> getCase(const std::string& caseId) const;
 		std::optional<GameState> getGameState(const std::string& sessionId) const;

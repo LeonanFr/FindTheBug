@@ -114,7 +114,7 @@ namespace FindTheBug {
         std::string name;
         PlayerRole role{ PlayerRole::Player };
         std::chrono::system_clock::time_point joinedAt;
-
+        std::chrono::system_clock::time_point lastSeen;
         crow::websocket::connection* connection{ nullptr };
     };
 

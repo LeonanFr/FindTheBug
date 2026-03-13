@@ -540,3 +540,36 @@ std::vector<std::string> MongoStore::getFrozenSessions(int maxTurnSeconds) {
     catch (...) {}
     return activeSessions;
 }
+
+bool MongoStore::updateLobby(const LobbyInfo& lobby) {
+    try {
+        auto conn = pImpl->acquire();
+        auto db = (*conn)[pImpl->dbName];
+        auto collection = db["sessions"];
+
+        bsoncxx::builder::stream::array players_array;
+        for (const auto& p : lobby.players) {
+            players_array << bsoncxx::builder::stream::open_document
+                << "name" << p.name
+                << "role" << static_cast<int>(p.role)
+                << "joinedAt" << bsoncxx::types::b_date(p.joinedAt)
+                << "lastSeen" << bsoncxx::types::b_date(p.lastSeen)
+                << bsoncxx::builder::stream::close_document;
+        }
+
+        auto update_doc = document{} << "$set" << open_document
+            << "players" << players_array
+            << "lastActivity" << bsoncxx::types::b_date(std::chrono::system_clock::now())
+            << close_document << finalize;
+
+        auto result = collection.update_one(
+            document{} << "sessionId" << lobby.sessionId << finalize,
+            update_doc.view()
+        );
+        return result && result->modified_count() > 0;
+    }
+    catch (const std::exception& e) {
+        std::print("[MONGO] Error in updateLobby: {}\n", e.what());
+        return false;
+    }
+}

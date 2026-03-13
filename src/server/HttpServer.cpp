@@ -57,6 +57,28 @@ void HttpServer::runReaper() {
 
             auto activeSessions = storage->getFrozenSessions(0);
 
+            auto now = std::chrono::system_clock::now();
+            for (const auto& sid : activeSessions) {
+                auto lobbyOpt = storage->getLobby(sid);
+                if (!lobbyOpt) continue;
+                auto lobby = *lobbyOpt;
+
+                bool changed = false;
+                lobby.players.erase(std::remove_if(lobby.players.begin(), lobby.players.end(),
+                    [now](const PlayerInfo& p) {
+                        return p.connection == nullptr && (now - p.lastSeen) > std::chrono::seconds(15);
+                    }), lobby.players.end());
+
+                if (lobby.players.empty()) {
+                    storage->deleteSession(sid);
+                    sessionManager->destroyLobby(sid, "Lobby vazio por inatividade");
+                }
+                else if (changed) {
+                    storage->updateLobby(lobby);
+                    broadcastLobbyState(sid);
+                }
+            }
+
             for (const auto& sid : activeSessions) {
                 auto stateOpt = storage->getGameState(sid);
                 if (!stateOpt) continue;
@@ -197,6 +219,26 @@ void HttpServer::handleWebSocketOpen(crow::websocket::connection& conn) {
 }
 
 void HttpServer::handleWebSocketClose(crow::websocket::connection& conn, const std::string& reason) {
+    auto info = sessionManager->getConnectionInfo(&conn);
+    if (info) {
+        std::string sessionId = info->first;
+        std::string playerName = info->second;
+
+        taskQueue->enqueue([this, sessionId, playerName]() {
+            auto lobbyOpt = storage->getLobby(sessionId);
+            if (lobbyOpt) {
+                auto& lobby = *lobbyOpt;
+                for (auto& p : lobby.players) {
+                    if (p.name == playerName) {
+                        p.lastSeen = std::chrono::system_clock::now();
+                        storage->updateLobby(lobby);
+                        break;
+                    }
+                }
+            }
+            });
+    }
+
     sessionManager->unregisterConnection(&conn);
     SessionManager::log("[WS] Fechado (" + reason + ")");
 }
@@ -305,18 +347,30 @@ void HttpServer::processJoinAsPlayer(crow::websocket::connection* conn, const st
             SessionManager::sendTo(conn, "{\"type\":\"ERROR\",\"message\":\"Lobby nao encontrado\"}");
             return;
         }
-        const auto& lobby = *lobbyOpt;
+        auto& lobby = *lobbyOpt;
 
-        bool isRejoining = false;
-        for (const auto& p : lobby.players) {
+        bool nameInUse = false;
+        PlayerInfo* existingPlayer = nullptr;
+        for (auto& p : lobby.players) {
             if (p.name == playerName) {
-                isRejoining = true;
+                existingPlayer = &p;
+                if (p.connection != nullptr && sessionManager->isPlayerOnline(sessionId, playerName)) {
+                    nameInUse = true;
+                }
                 break;
             }
         }
 
-        if (isRejoining) {
+        if (nameInUse) {
+            SessionManager::sendTo(conn, "{\"type\":\"ERROR\",\"message\":\"Nome ja em uso\"}");
+            return;
+        }
+
+        if (existingPlayer) {
+            existingPlayer->connection = conn;
+            existingPlayer->lastSeen = std::chrono::system_clock::now();
             sessionManager->registerConnection(sessionId, conn, playerName);
+
             std::string resp = std::format(
                 "{{\"type\":\"JOINED_LOBBY\",\"sessionId\":\"{}\",\"playerName\":\"{}\",\"isRejoin\":true}}",
                 sessionId, escapeJSON(playerName)
@@ -324,12 +378,16 @@ void HttpServer::processJoinAsPlayer(crow::websocket::connection* conn, const st
             SessionManager::sendTo(conn, resp);
             if (lobby.phase == GamePhase::Investigation) broadcastGameState(sessionId);
             SessionManager::log("[RECONNECT] Jogador " + playerName + " voltou para sessao " + sessionId);
+
+            storage->updateLobby(lobby);
         }
         else {
             PlayerInfo p;
             p.name = playerName;
             p.role = PlayerRole::Player;
             p.joinedAt = std::chrono::system_clock::now();
+            p.lastSeen = std::chrono::system_clock::now();
+            p.connection = conn;
 
             if (storage->addPlayerToLobby(sessionId, p)) {
                 sessionManager->registerConnection(sessionId, conn, playerName);
