@@ -471,7 +471,7 @@ void HttpServer::processStartGame(crow::websocket::connection* conn, const std::
             allParticipants.push_back(p.name);
         }
 
-        if (!engine->initializeGameFromLobby(sessionId, caseId, allParticipants, masterPlayerId, masterPlayerId)) {
+        if (!engine->initializeGameFromLobby(sessionId, caseId, allParticipants, masterPlayerId)) {
             SessionManager::sendTo(conn, "{\"type\":\"ERROR\",\"message\":\"Erro ao criar sessao de jogo no banco.\"}");
             return;
         }

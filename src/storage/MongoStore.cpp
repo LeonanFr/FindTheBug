@@ -41,10 +41,7 @@ MongoStore::MongoStore(const std::string& connectionUri, const std::string& dbNa
 
 MongoStore::~MongoStore() = default;
 
-
-// Operações de Lobby
-
-bool MongoStore::createLobby(const std::string& sessionId, const PlayerInfo& host) {
+bool MongoStore::createLobby(const std::string& sessionId, const PlayerInfo& master) {
     try {
         auto conn = pImpl->acquire();
         auto db = (*conn)[pImpl->dbName];
@@ -57,9 +54,9 @@ bool MongoStore::createLobby(const std::string& sessionId, const PlayerInfo& hos
             << "lastActivity" << bsoncxx::types::b_date(std::chrono::system_clock::now())
             << "players" << open_array
             << open_document
-            << "name" << host.name
-            << "role" << static_cast<int>(host.role)
-            << "joinedAt" << bsoncxx::types::b_date(host.joinedAt)
+            << "name" << master.name
+            << "role" << static_cast<int>(master.role)
+            << "joinedAt" << bsoncxx::types::b_date(master.joinedAt)
             << close_document
             << close_array
             << finalize;
@@ -206,8 +203,6 @@ bool MongoStore::sessionExists(const std::string& sessionId) const {
     catch (...) { return false; }
 }
 
-// Operações de Jogo
-
 std::optional<BugCase> MongoStore::getCase(const std::string& caseId) const {
     try {
         auto conn = pImpl->acquire();
@@ -309,7 +304,6 @@ std::optional<GameState> MongoStore::getGameState(const std::string& sessionId) 
         if (view["remainingPoints"]) gs.remainingPoints = view["remainingPoints"].get_int32().value;
         if (view["isCompleted"]) gs.isCompleted = view["isCompleted"].get_bool().value;
         if (view["isSuddenDeath"]) gs.isSuddenDeath = view["isSuddenDeath"].get_bool().value;
-        if (view["hostPlayerId"]) gs.hostPlayerId = std::string(view["hostPlayerId"].get_string().value);
         if (view["masterPlayerId"]) gs.masterPlayerId = std::string(view["masterPlayerId"].get_string().value);
 
         if (view["currentTurnIndex"]) gs.currentTurnIndex = view["currentTurnIndex"].get_int32().value;
@@ -385,8 +379,7 @@ std::optional<GameState> MongoStore::getGameState(const std::string& sessionId) 
     }
 }
 
-std::vector<CaseSummary> FindTheBug::MongoStore::listAvailableCases() const
-{
+std::vector<CaseSummary> MongoStore::listAvailableCases() const {
     std::vector<CaseSummary> summaries;
 
     try {
@@ -395,7 +388,6 @@ std::vector<CaseSummary> FindTheBug::MongoStore::listAvailableCases() const
         auto collection = db["cases"];
 
         mongocxx::options::find opts;
-        
         opts.projection(document{}
             << "id" << 1
             << "title" << 1
@@ -408,7 +400,7 @@ std::vector<CaseSummary> FindTheBug::MongoStore::listAvailableCases() const
         for (auto&& doc : cursor) {
             CaseSummary s;
             if (doc["id"]) s.id = std::string(doc["id"].get_string().value);
-            if (doc["title"]) s.id = std::string(doc["title"].get_string().value);
+            if (doc["title"]) s.title = std::string(doc["title"].get_string().value);
             if (doc["shortDescription"])
                 s.shortDescription = std::string(doc["shortDescription"].get_string().value);
             else
@@ -467,7 +459,7 @@ bool MongoStore::saveGameState(const GameState& state) {
             << "isCompleted" << state.isCompleted
             << "isSuddenDeath" << state.isSuddenDeath
             << "playerIds" << player_ids_array
-            << "hostPlayerId" << state.hostPlayerId
+            << "masterPlayerId" << state.masterPlayerId
             << "currentTurnIndex" << state.currentTurnIndex
             << "turnOrder" << turn_order_array
             << "turnStartTime" << bsoncxx::types::b_date(state.turnStartTime)
@@ -496,35 +488,14 @@ bool MongoStore::deleteSession(const std::string& sessionId) {
         auto db = (*conn)[pImpl->dbName];
         auto collection = db["sessions"];
 
-        std::print("[MONGO DEBUG] Iniciando remocao da sessao: {}\n", sessionId);
-
-        auto count = collection.count_documents(document{} << "sessionId" << sessionId << finalize);
-        std::print("[MONGO DEBUG] Documentos encontrados antes do delete: {}\n", count);
-
-        if (count == 0) {
-            std::print("[MONGO AVISO] A sessao {} nao foi encontrada no banco para deletar.\n", sessionId);
-            return false;
-        }
-
         auto result = collection.delete_one(
             document{} << "sessionId" << sessionId << finalize
         );
 
-        if (result) {
-            std::print("[MONGO DEBUG] Operacao delete concluida. Deletados: {}\n", result->deleted_count());
-            return result->deleted_count() > 0;
-        }
-        else {
-            std::print("[MONGO ERRO] O driver retornou um resultado vazio (std::nullopt).\n");
-            return false;
-        }
+        return result && result->deleted_count() > 0;
     }
     catch (const std::exception& e) {
-        std::print("[MONGO CRITICO] Excecao ao deletar sessao: {}\n", e.what());
-        return false;
-    }
-    catch (...) {
-        std::print("[MONGO CRITICO] Erro desconhecido ao deletar sessao.\n");
+        std::print("[MONGO] Error in deleteSession: {}\n", e.what());
         return false;
     }
 }

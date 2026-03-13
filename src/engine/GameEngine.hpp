@@ -18,7 +18,6 @@ namespace FindTheBug {
             const std::string& sessionId,
             const std::string& caseId,
             const std::vector<std::string>& playerNames,
-            const std::string& hostPlayerId,
             const std::string& masterPlayerId
         );
 

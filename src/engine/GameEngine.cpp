@@ -14,6 +14,7 @@ namespace FindTheBug {
         std::shared_ptr<MongoStore> storage;
         ActionSystem actionSystem;
         ValidationSystem validationSystem;
+
         void advanceTurn(GameState& state) {
             if (state.turnOrder.empty()) return;
             state.currentTurnIndex = (state.currentTurnIndex + 1) % state.turnOrder.size();
@@ -36,7 +37,6 @@ namespace FindTheBug {
         const std::string& sessionId,
         const std::string& caseId,
         const std::vector<std::string>& allParticipants,
-        const std::string& hostPlayerId,
         const std::string& masterPlayerId
     ) {
         auto bugCase = pImpl->storage->getCase(caseId);
@@ -44,8 +44,6 @@ namespace FindTheBug {
             std::print("[ENGINE] Erro: CaseID {} nao encontrado.\n", caseId);
             return false;
         }
-
-
 
         GameState initialState;
 
@@ -64,7 +62,6 @@ namespace FindTheBug {
         initialState.isCompleted = false;
         initialState.isSuddenDeath = false;
         initialState.playerIds = allParticipants;
-        initialState.hostPlayerId = hostPlayerId;
         initialState.masterPlayerId = masterPlayerId;
 
         return pImpl->storage->saveGameState(initialState);
@@ -83,7 +80,7 @@ namespace FindTheBug {
         auto& state = *stateOpt;
 
         bool isPlayerInGame = std::find(state.playerIds.begin(), state.playerIds.end(), playerId) != state.playerIds.end();
-        if (!isPlayerInGame && playerId != state.hostPlayerId) {
+        if (!isPlayerInGame && playerId != state.masterPlayerId) {
             return { .success = false, .newState = state, .message = "Erro: Jogador nao faz parte da sessao." };
         }
 
@@ -279,7 +276,6 @@ namespace FindTheBug {
         return GameResult::Running;
     }
 
-
     GameResult GameEngine::removePlayer(const std::string& sessionId, const std::string& playerId) {
         auto stateOpt = pImpl->storage->getGameState(sessionId);
         if (!stateOpt) return GameResult::Running;
@@ -305,7 +301,6 @@ namespace FindTheBug {
             }
         }
 
-    
         if (state.turnOrder.size() < 2) {
             state.isCompleted = true;
             pImpl->storage->saveGameState(state);
