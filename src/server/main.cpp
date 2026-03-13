@@ -22,7 +22,6 @@ std::string getEnvVar(const char* key, const char* defaultValue = "") {
 
 int main()
 {
-    system("chcp 65001 > nul");
 
     try
     {

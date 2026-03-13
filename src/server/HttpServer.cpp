@@ -48,94 +48,9 @@ taskQueue(std::move(taskQueue))
     SessionManager::log("[INIT] HttpServer inicializado com fila de tarefas.");
 }
 
-void HttpServer::runReaper() {
-    std::thread([this]() {
-        while (true) {
-            std::this_thread::sleep_for(std::chrono::seconds(5));
-
-            storage->removeStaleSessions(5);
-
-            auto activeSessions = storage->getFrozenSessions(0);
-
-            auto now = std::chrono::system_clock::now();
-            for (const auto& sid : activeSessions) {
-                auto lobbyOpt = storage->getLobby(sid);
-                if (!lobbyOpt) continue;
-                auto lobby = *lobbyOpt;
-
-                bool changed = false;
-                lobby.players.erase(std::remove_if(lobby.players.begin(), lobby.players.end(),
-                    [this, &sid, now](const PlayerInfo& p) {
-                        bool isOnline = sessionManager->isPlayerOnline(sid, p.name);
-                        return !isOnline && (now - p.lastSeen) > std::chrono::seconds(15);
-                    }), lobby.players.end());
-
-                if (lobby.players.empty()) {
-                    storage->deleteSession(sid);
-                    sessionManager->destroyLobby(sid, "Lobby vazio por inatividade");
-                }
-                else if (changed) {
-                    storage->updateLobby(lobby);
-                    broadcastLobbyState(sid);
-                }
-            }
-
-            for (const auto& sid : activeSessions) {
-                auto stateOpt = storage->getGameState(sid);
-                if (!stateOpt) continue;
-                auto state = *stateOpt;
-
-                auto now = std::chrono::system_clock::now();
-
-                if (state.isCompleted) {
-                    auto endedAgo = std::chrono::duration_cast<std::chrono::seconds>(now - state.lastActivity).count();
-
-                    if (endedAgo > 60) {
-                        SessionManager::log("[REAPER] Jogo finalizado ha >60s na sessao " + sid + ". Deletando.");
-                        storage->deleteSession(sid);
-                        sessionManager->closeSession(sid);
-                    }
-                    continue;
-                }
-
-                if (state.turnOrder.empty()) {
-                    storage->deleteSession(sid);
-                    sessionManager->closeSession(sid);
-                    continue;
-                }
-                auto duration = std::chrono::duration_cast<std::chrono::seconds>(now - state.turnStartTime).count();
-                std::string currentPlayer = state.turnOrder[state.currentTurnIndex];
-
-                bool isOnline = sessionManager->isPlayerOnline(sid, currentPlayer);
-                long timeLimit = isOnline ? 120 : 15;
-
-                if (duration > timeLimit) {
-
-                    state.currentTurnIndex = (state.currentTurnIndex + 1) % state.turnOrder.size();
-
-                    state.turnStartTime = std::chrono::system_clock::now();
-
-                    if (storage->saveGameState(state)) {
-                        broadcastGameState(sid);
-
-                        std::string reason = isOnline ? "TIMEOUT" : "OFFLINE_SKIP";
-                        std::string msg = std::format(
-                            "{{\"type\":\"TURN_SKIPPED\",\"previousPlayer\":\"{}\",\"reason\":\"{}\"}}",
-                            currentPlayer, reason
-                        );
-                        sessionManager->broadcastToSession(sid, msg);
-                    }
-                }
-            }
-        }
-        }).detach();
-}
-
 void HttpServer::run(uint16_t port) {
 
     SessionManager::log("[DEBUG] HttpServer::run iniciando na porta " + std::to_string(port));
-
-    this->runReaper();
 
     crow::SimpleApp app;
 

@@ -31,7 +31,7 @@ public:
     }
 
     auto acquire() {
-        return pool->acquire();
+        return pool->try_acquire();
     }
 };
 
@@ -43,7 +43,12 @@ MongoStore::~MongoStore() = default;
 
 bool MongoStore::createLobby(const std::string& sessionId, const PlayerInfo& master) {
     try {
-        auto conn = pImpl->acquire();
+        auto connOpt = pImpl->acquire();
+        if (!connOpt) {
+            std::print("[MONGO] Pool esgotado, não foi possível criar lobby.\n");
+            return false;
+        }
+        auto conn = std::move(*connOpt);
         auto db = (*conn)[pImpl->dbName];
         auto collection = db["sessions"];
 
@@ -57,6 +62,7 @@ bool MongoStore::createLobby(const std::string& sessionId, const PlayerInfo& mas
             << "name" << master.name
             << "role" << static_cast<int>(master.role)
             << "joinedAt" << bsoncxx::types::b_date(master.joinedAt)
+            << "lastSeen" << bsoncxx::types::b_date(std::chrono::system_clock::now())
             << close_document
             << close_array
             << finalize;
@@ -72,7 +78,12 @@ bool MongoStore::createLobby(const std::string& sessionId, const PlayerInfo& mas
 
 bool MongoStore::addPlayerToLobby(const std::string& sessionId, const PlayerInfo& player) {
     try {
-        auto conn = pImpl->acquire();
+        auto connOpt = pImpl->acquire();
+        if (!connOpt) {
+            std::print("[MONGO] Pool esgotado, não foi possível adicionar jogador.\n");
+            return false;
+        }
+        auto conn = std::move(*connOpt);
         auto db = (*conn)[pImpl->dbName];
         auto collection = db["sessions"];
 
@@ -82,6 +93,7 @@ bool MongoStore::addPlayerToLobby(const std::string& sessionId, const PlayerInfo
             << "name" << player.name
             << "role" << static_cast<int>(player.role)
             << "joinedAt" << bsoncxx::types::b_date(player.joinedAt)
+            << "lastSeen" << bsoncxx::types::b_date(player.lastSeen)
             << close_document
             << close_document
             << "$set" << open_document
@@ -104,7 +116,12 @@ bool MongoStore::addPlayerToLobby(const std::string& sessionId, const PlayerInfo
 
 bool MongoStore::removePlayerFromLobby(const std::string& sessionId, const std::string& playerName) {
     try {
-        auto conn = pImpl->acquire();
+        auto connOpt = pImpl->acquire();
+        if (!connOpt) {
+            std::print("[MONGO] Pool esgotado, não foi possível remover jogador.\n");
+            return false;
+        }
+        auto conn = std::move(*connOpt);
         auto db = (*conn)[pImpl->dbName];
         auto collection = db["sessions"];
 
@@ -134,7 +151,12 @@ bool MongoStore::removePlayerFromLobby(const std::string& sessionId, const std::
 
 bool MongoStore::updatePhase(const std::string& sessionId, GamePhase newPhase) {
     try {
-        auto conn = pImpl->acquire();
+        auto connOpt = pImpl->acquire();
+        if (!connOpt) {
+            std::print("[MONGO] Pool esgotado, não foi possível atualizar fase.\n");
+            return false;
+        }
+        auto conn = std::move(*connOpt);
         auto db = (*conn)[pImpl->dbName];
         auto collection = db["sessions"];
 
@@ -155,7 +177,12 @@ bool MongoStore::updatePhase(const std::string& sessionId, GamePhase newPhase) {
 
 std::optional<LobbyInfo> MongoStore::getLobby(const std::string& sessionId) const {
     try {
-        auto conn = pImpl->acquire();
+        auto connOpt = pImpl->acquire();
+        if (!connOpt) {
+            std::print("[MONGO] Pool esgotado, não foi possível obter lobby.\n");
+            return std::nullopt;
+        }
+        auto conn = std::move(*connOpt);
         auto db = (*conn)[pImpl->dbName];
         auto collection = db["sessions"];
 
@@ -180,6 +207,8 @@ std::optional<LobbyInfo> MongoStore::getLobby(const std::string& sessionId) cons
                 PlayerInfo p;
                 if (doc["name"]) p.name = std::string(doc["name"].get_string().value);
                 if (doc["role"]) p.role = static_cast<PlayerRole>(doc["role"].get_int32().value);
+                if (doc["joinedAt"]) p.joinedAt = doc["joinedAt"].get_date();
+                if (doc["lastSeen"]) p.lastSeen = doc["lastSeen"].get_date();
 
                 lobby.players.push_back(p);
             }
@@ -195,7 +224,12 @@ std::optional<LobbyInfo> MongoStore::getLobby(const std::string& sessionId) cons
 
 bool MongoStore::sessionExists(const std::string& sessionId) const {
     try {
-        auto conn = pImpl->acquire();
+        auto connOpt = pImpl->acquire();
+        if (!connOpt) {
+            std::print("[MONGO] Pool esgotado, não foi possível verificar sessão.\n");
+            return false;
+        }
+        auto conn = std::move(*connOpt);
         auto db = (*conn)[pImpl->dbName];
         auto collection = db["sessions"];
         return collection.count_documents(document{} << "sessionId" << sessionId << finalize) > 0;
@@ -205,7 +239,12 @@ bool MongoStore::sessionExists(const std::string& sessionId) const {
 
 std::optional<BugCase> MongoStore::getCase(const std::string& caseId) const {
     try {
-        auto conn = pImpl->acquire();
+        auto connOpt = pImpl->acquire();
+        if (!connOpt) {
+            std::print("[MONGO] Pool esgotado, não foi possível obter caso.\n");
+            return std::nullopt;
+        }
+        auto conn = std::move(*connOpt);
         auto db = (*conn)[pImpl->dbName];
         auto collection = db["cases"];
 
@@ -288,7 +327,12 @@ std::optional<BugCase> MongoStore::getCase(const std::string& caseId) const {
 
 std::optional<GameState> MongoStore::getGameState(const std::string& sessionId) const {
     try {
-        auto conn = pImpl->acquire();
+        auto connOpt = pImpl->acquire();
+        if (!connOpt) {
+            std::print("[MONGO] Pool esgotado, não foi possível obter estado do jogo.\n");
+            return std::nullopt;
+        }
+        auto conn = std::move(*connOpt);
         auto db = (*conn)[pImpl->dbName];
         auto collection = db["sessions"];
 
@@ -383,7 +427,12 @@ std::vector<CaseSummary> MongoStore::listAvailableCases() const {
     std::vector<CaseSummary> summaries;
 
     try {
-        auto conn = pImpl->acquire();
+        auto connOpt = pImpl->acquire();
+        if (!connOpt) {
+            std::print("[MONGO] Pool esgotado, não foi possível listar casos.\n");
+            return summaries;
+        }
+        auto conn = std::move(*connOpt);
         auto db = (*conn)[pImpl->dbName];
         auto collection = db["cases"];
 
@@ -417,7 +466,12 @@ std::vector<CaseSummary> MongoStore::listAvailableCases() const {
 
 bool MongoStore::saveGameState(const GameState& state) {
     try {
-        auto conn = pImpl->acquire();
+        auto connOpt = pImpl->acquire();
+        if (!connOpt) {
+            std::print("[MONGO] Pool esgotado, não foi possível salvar estado do jogo.\n");
+            return false;
+        }
+        auto conn = std::move(*connOpt);
         auto db = (*conn)[pImpl->dbName];
         auto collection = db["sessions"];
 
@@ -484,7 +538,12 @@ bool MongoStore::saveGameState(const GameState& state) {
 
 bool MongoStore::deleteSession(const std::string& sessionId) {
     try {
-        auto conn = pImpl->acquire();
+        auto connOpt = pImpl->acquire();
+        if (!connOpt) {
+            std::print("[MONGO] Pool esgotado, não foi possível deletar sessão.\n");
+            return false;
+        }
+        auto conn = std::move(*connOpt);
         auto db = (*conn)[pImpl->dbName];
         auto collection = db["sessions"];
 
@@ -502,7 +561,12 @@ bool MongoStore::deleteSession(const std::string& sessionId) {
 
 long MongoStore::removeStaleSessions(int minutes) {
     try {
-        auto conn = pImpl->acquire();
+        auto connOpt = pImpl->acquire();
+        if (!connOpt) {
+            std::print("[MONGO] Pool esgotado, não foi possível remover sessões obsoletas.\n");
+            return 0;
+        }
+        auto conn = std::move(*connOpt);
         auto db = (*conn)[pImpl->dbName];
         auto collection = db["sessions"];
 
@@ -520,30 +584,44 @@ long MongoStore::removeStaleSessions(int minutes) {
     catch (...) { return 0; }
 }
 
-std::vector<std::string> MongoStore::getFrozenSessions(int maxTurnSeconds) {
+std::vector<std::string> MongoStore::getFrozenSessions(int) {
     std::vector<std::string> activeSessions;
     try {
-        auto conn = pImpl->acquire();
+        auto connOpt = pImpl->acquire();
+        if (!connOpt) {
+            std::print("[MONGO] Pool esgotado, não foi possível obter sessões ativas.\n");
+            return activeSessions;
+        }
+        auto conn = std::move(*connOpt);
         auto db = (*conn)[pImpl->dbName];
         auto collection = db["sessions"];
 
-        auto cursor = collection.find(
-            document{} << "phase" << 1 << finalize
-        );
+        auto cursor = collection.find({});
 
         for (auto&& doc : cursor) {
             if (doc["sessionId"]) {
                 activeSessions.push_back(std::string(doc["sessionId"].get_string().value));
             }
         }
+
+        if (!activeSessions.empty()) {
+            std::print("[MONGO] getFrozenSessions encontrou {} sessões.\n", activeSessions.size());
+        }
     }
-    catch (...) {}
+    catch (const std::exception& e) {
+        std::print("[MONGO] Erro no getFrozenSessions: {}\n", e.what());
+    }
     return activeSessions;
 }
 
 bool MongoStore::updateLobby(const LobbyInfo& lobby) {
     try {
-        auto conn = pImpl->acquire();
+        auto connOpt = pImpl->acquire();
+        if (!connOpt) {
+            std::print("[MONGO] Pool esgotado, não foi possível atualizar lobby.\n");
+            return false;
+        }
+        auto conn = std::move(*connOpt);
         auto db = (*conn)[pImpl->dbName];
         auto collection = db["sessions"];
 

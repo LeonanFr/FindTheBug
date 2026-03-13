@@ -21,9 +21,9 @@ namespace FindTheBug {
             );
         ~HttpServer() = default;
 
-        void runReaper();
         void run(uint16_t port = 8080);
     private:
+
 		// WebSocket handlers
 		void handleWebSocketOpen(crow::websocket::connection& conn);
 		void handleWebSocketClose(crow::websocket::connection& conn, const std::string& reason);

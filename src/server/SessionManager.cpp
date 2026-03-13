@@ -136,7 +136,8 @@ void SessionManager::sendTo(crow::websocket::connection* conn, const std::string
 void SessionManager::log(const std::string& msg) {
     try {
         std::lock_guard<std::mutex> lock(global_log_mutex);
-        std::print("{}\n", msg);
+        std::print(stderr, "{}\n", msg);
+        std::fflush(stderr);
     }
     catch (...) {}
 }
