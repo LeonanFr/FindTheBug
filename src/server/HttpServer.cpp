@@ -106,6 +106,12 @@ void HttpServer::run(uint16_t port) {
 
         j["systemTopology"] = std::move(topo);
 
+        std::vector<crow::json::wvalue> qs;
+        for (const auto& q : c.solutionQuestions) {
+            qs.push_back(q);
+        }
+        j["solutionQuestions"] = std::move(qs);
+
 
         return crow::response(j);
             });
@@ -280,15 +286,32 @@ void HttpServer::processJoinAsPlayer(crow::websocket::connection* conn, const st
             }
         }
 
+        if (!existing && lobby.phase != GamePhase::Lobby) {
+            SessionManager::sendTo(conn, "{\"type\":\"ERROR\",\"message\":\"A partida já foi iniciada.\"}");
+            return;
+        }
+
         if (existing) {
             std::string resp = std::format(
                 "{{\"type\":\"JOINED_LOBBY\",\"sessionId\":\"{}\",\"playerName\":\"{}\",\"isRejoin\":true}}",
                 sessionId, escapeJSON(playerName)
             );
             SessionManager::sendTo(conn, resp);
-            broadcastLobbyState(sessionId);
-            if (lobby.phase == GamePhase::Investigation) broadcastGameState(sessionId);
 
+            if (lobby.phase == GamePhase::Lobby) {
+                broadcastLobbyState(sessionId);
+            }
+            else {
+                auto stateOpt = storage->getGameState(sessionId);
+                if (stateOpt) {
+                    std::string startMsg = std::format(
+                        "{{\"type\":\"GAME_STARTED\",\"sessionId\":\"{}\",\"caseId\":\"{}\"}}",
+                        sessionId, escapeJSON(stateOpt->currentCaseId)
+                    );
+                    SessionManager::sendTo(conn, startMsg);
+                    broadcastGameState(sessionId);
+                }
+            }
             storage->updateLobby(lobby);
         }
         else {
@@ -339,6 +362,11 @@ void HttpServer::processJoinAsMaster(crow::websocket::connection* conn, const st
             }
         }
 
+        if (!isRejoin && lobby.phase != GamePhase::Lobby) {
+            SessionManager::sendTo(conn, "{\"type\":\"ERROR\",\"message\":\"A partida já foi iniciada.\"}");
+            return;
+        }
+
         if (masterExists && !isRejoin) {
             SessionManager::sendTo(conn, "{\"type\":\"ERROR\",\"message\":\"Ja existe um Mestre nesta sessao.\"}");
             return;
@@ -354,7 +382,18 @@ void HttpServer::processJoinAsMaster(crow::websocket::connection* conn, const st
             SessionManager::sendTo(conn, resp);
 
             if (lobby.phase != GamePhase::Lobby) {
-                broadcastGameState(sessionId);
+                auto stateOpt = storage->getGameState(sessionId);
+                if (stateOpt) {
+                    std::string startMsg = std::format(
+                        "{{\"type\":\"GAME_STARTED\",\"sessionId\":\"{}\",\"caseId\":\"{}\"}}",
+                        sessionId, escapeJSON(stateOpt->currentCaseId)
+                    );
+                    SessionManager::sendTo(conn, startMsg);
+                    broadcastGameState(sessionId);
+                }
+            }
+            else {
+                broadcastLobbyState(sessionId);
             }
             SessionManager::log("[RECONNECT] Mestre " + masterName + " voltou para sessao " + sessionId);
         }
@@ -372,13 +411,7 @@ void HttpServer::processJoinAsMaster(crow::websocket::connection* conn, const st
                     sessionId, escapeJSON(masterName), (int)PlayerRole::Master
                 );
                 SessionManager::sendTo(conn, resp);
-
-                if (lobby.phase != GamePhase::Lobby) {
-                    broadcastGameState(sessionId);
-                }
-                else {
-                    broadcastLobbyState(sessionId);
-                }
+                broadcastLobbyState(sessionId);
             }
             else {
                 SessionManager::sendTo(conn, "{\"type\":\"ERROR\",\"message\":\"Erro ao salvar Mestre.\"}");
@@ -387,6 +420,7 @@ void HttpServer::processJoinAsMaster(crow::websocket::connection* conn, const st
         });
 }
 
+
 void HttpServer::processGetLobbyInfo(crow::websocket::connection* conn, const std::string& sessionId) {
     taskQueue->enqueue([this, conn, sessionId]() {
         auto lobbyOpt = storage->getLobby(sessionId);
@@ -394,6 +428,7 @@ void HttpServer::processGetLobbyInfo(crow::websocket::connection* conn, const st
             auto& lobby = *lobbyOpt;
             std::ostringstream oss;
             oss << "{\"type\":\"LOBBY_INFO\",\"exists\":true,\"sessionId\":\"" << lobby.sessionId << "\",";
+            oss << "\"phase\":" << static_cast<int>(lobby.phase) << ",";
             oss << "\"players\":[";
             bool first = true;
             for (const auto& p : lobby.players) {
@@ -419,35 +454,29 @@ void HttpServer::processStartGame(crow::websocket::connection* conn, const std::
         }
 
         const auto& lobby = *lobbyOpt;
-
         const PlayerInfo* master = lobby.getMaster();
         if (!master || master->name != playerName) {
-            SessionManager::log("[WARN] Tentativa de inicio por nao-master: " + playerName);
-            SessionManager::sendTo(conn, "{\"type\":\"ERROR\",\"message\":\"Permissao negada. Apenas o Mestre pode iniciar.\"}");
+            SessionManager::sendTo(conn, "{\"type\":\"ERROR\",\"message\":\"Apenas o Mestre pode iniciar.\"}");
             return;
         }
 
         int playerCount = 0;
         for (const auto& p : lobby.players) {
-            if (p.role == PlayerRole::Player) {
-                playerCount++;
-            }
+            if (p.role == PlayerRole::Player) playerCount++;
         }
 
         if (playerCount < 1 || playerCount > 4) {
-            SessionManager::sendTo(conn, "{\"type\":\"ERROR\",\"message\":\"A partida requer de 1 a 4 jogadores (alem do Mestre).\"}");
+            SessionManager::sendTo(conn, "{\"type\":\"ERROR\",\"message\":\"Requer de 1 a 4 jogadores.\"}");
             return;
         }
 
         std::vector<std::string> allParticipants;
-        std::string masterPlayerId = master->name;
-
         for (const auto& p : lobby.players) {
             allParticipants.push_back(p.name);
         }
 
-        if (!engine->initializeGameFromLobby(sessionId, caseId, allParticipants, masterPlayerId)) {
-            SessionManager::sendTo(conn, "{\"type\":\"ERROR\",\"message\":\"Erro ao criar sessao de jogo no banco.\"}");
+        if (!engine->initializeGameFromLobby(sessionId, caseId, allParticipants, master->name)) {
+            SessionManager::sendTo(conn, "{\"type\":\"ERROR\",\"message\":\"Erro ao inicializar engine.\"}");
             return;
         }
 
@@ -457,7 +486,10 @@ void HttpServer::processStartGame(crow::websocket::connection* conn, const std::
                 sessionId, escapeJSON(caseId)
             );
             sessionManager->broadcastToSession(sessionId, msg);
-            SessionManager::log("[GAME] Jogo iniciado pelo Mestre " + playerName + " na sessao " + sessionId);
+
+            broadcastGameState(sessionId);
+
+            SessionManager::log("[GAME] Jogo iniciado e estado inicial enviado: " + sessionId);
         }
         });
 }
@@ -605,17 +637,46 @@ void HttpServer::processLeaveLobby(crow::websocket::connection* conn, const crow
 
         if (master && master->name == pName) {
             storage->deleteSession(sid);
-            sessionManager->destroyLobby(sid, "Mestre encerrou a sala");
+            sessionManager->destroyLobby(sid, "A sessão foi encerrada pelo Mestre.");
         }
         else {
             if (storage->removePlayerFromLobby(sid, pName)) {
-                auto updated = storage->getLobby(sid);
-                if (!updated || updated->players.empty()) {
+                auto updatedLobby = storage->getLobby(sid);
+
+                if (!updatedLobby || updatedLobby->playerCount() == 0) {
                     storage->deleteSession(sid);
-                    sessionManager->destroyLobby(sid, "Lobby vazio");
+                    sessionManager->destroyLobby(sid, "Todos os investigadores abandonaram a partida.");
                 }
                 else {
-                    broadcastLobbyState(sid);
+                    if (lobby.phase == GamePhase::Lobby) {
+                        broadcastLobbyState(sid);
+                    }
+                    else {
+                        auto stateOpt = storage->getGameState(sid);
+                        if (stateOpt) {
+                            auto& state = *stateOpt;
+                            auto it = std::find(state.turnOrder.begin(), state.turnOrder.end(), pName);
+                            if (it != state.turnOrder.end()) {
+                                int index = std::distance(state.turnOrder.begin(), it);
+                                state.turnOrder.erase(it);
+
+                                if (state.turnOrder.empty()) {
+                                    storage->deleteSession(sid);
+                                    sessionManager->destroyLobby(sid, "Todos os investigadores abandonaram a partida.");
+                                    return;
+                                }
+
+                                if (state.currentTurnIndex >= state.turnOrder.size()) {
+                                    state.currentTurnIndex = 0;
+                                }
+                                else if (index < state.currentTurnIndex) {
+                                    state.currentTurnIndex--;
+                                }
+                            }
+                            storage->saveGameState(state);
+                            broadcastGameState(sid);
+                        }
+                    }
                 }
             }
         }
@@ -669,6 +730,7 @@ void HttpServer::broadcastLobbyState(const std::string& sessionId) {
     std::ostringstream oss;
     oss << "{\"type\":\"LOBBY_UPDATE\",\"sessionId\":\"" << lobby.sessionId << "\",";
     oss << "\"canStart\":" << (lobby.canStartGame() ? "true" : "false") << ",";
+    oss << "\"phase\":" << static_cast<int>(lobby.phase) << ",";
     oss << "\"players\":[";
 
     bool first = true;
@@ -678,9 +740,7 @@ void HttpServer::broadcastLobbyState(const std::string& sessionId) {
         first = false;
     }
     oss << "]}";
-    std::string msg = oss.str();
-    SessionManager::log("[BROADCAST] " + msg);
-    sessionManager->broadcastToSession(sessionId, msg);
+    sessionManager->broadcastToSession(sessionId, oss.str());
 }
 
 std::string HttpServer::generateSessionId() {
