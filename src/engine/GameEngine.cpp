@@ -267,6 +267,7 @@ namespace FindTheBug {
             state.currentDay = 5;
             state.isSuddenDeath = true;
             state.remainingPoints = 0;
+            pImpl->storage->saveGameState(state);
             return GameResult::Running;
         }
 

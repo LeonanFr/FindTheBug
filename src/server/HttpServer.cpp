@@ -564,8 +564,7 @@ void FindTheBug::HttpServer::processValidateSolution(crow::websocket::connection
             sessionManager->closeSession(sessionId);
         }
         else {
-            broadcastLobbyState(sessionId);
-
+            broadcastGameState(sessionId);
             sessionManager->broadcastToSession(sessionId, "{\"type\":\"SOLUTION_REJECTED\",\"message\":\"Solucao incorreta. Penalidade aplicada.\"}");
         }
         });
