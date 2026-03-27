@@ -54,6 +54,12 @@ void HttpServer::run(uint16_t port) {
 
     crow::SimpleApp app;
 
+    CROW_ROUTE(app, "/health")
+        .methods("HEAD"_method, crow::HTTPMethod::Get)
+        ([]() {
+        return crow::response(200);
+            });
+
     CROW_ROUTE(app, "/cases").methods(crow::HTTPMethod::GET)
         ([this]() {
         auto cases = storage->listAvailableCases();
